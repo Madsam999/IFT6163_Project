@@ -12,7 +12,7 @@ from typing import Optional
 
 def create_pupper_env():
   CONFIG_DIR = puppersim.getPupperSimPath()
-  _CONFIG_FILE = os.path.join(CONFIG_DIR, "config", "pupper_pmtg.gin")
+  _CONFIG_FILE = os.path.join(CONFIG_DIR, "config", "pupper_pmtg_standing.gin")
   #  _NUM_STEPS = 10000
   #  _ENV_RANDOM_SEED = 2
 
