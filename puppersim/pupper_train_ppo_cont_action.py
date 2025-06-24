@@ -89,7 +89,9 @@ def make_env(env_id, idx, capture_video, run_name, gamma):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode='rgb_array')
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+            env = gym.wrappers.RecordVideo(env, 
+                                           f"videos/{run_name}", 
+                                           episode_trigger=lambda episode_id: episode_id % 25 == 0)
         else:
             env = gym.make(env_id)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space

@@ -9,6 +9,13 @@ register(
 )
 
 register(
+  id='PupperStandGymEnv-v0',
+  entry_point='puppersim.pupper_gym_env:PupperGymEnv',
+  max_episode_steps=1000,
+  reward_threshold=-1,
+)
+
+register(
   id='ReacherEnv-v0',
   entry_point='puppersim.reacher.reacher_env:ReacherEnv',
   max_episode_steps=150,
