@@ -1,18 +1,26 @@
 import os
 from gymnasium import register as register
+from puppersim.pupper_gym_env import make_env
 
 register(
   id='PupperGymEnv-v0',
-  entry_point='puppersim.pupper_gym_env:PupperGymEnv',
+  entry_point=make_env(gin_file="pupper_pmtg.gin", render_mode='rgb_array', render=False),
   max_episode_steps=150,
   reward_threshold=5.0,
 )
 
 register(
   id='PupperStandGymEnv-v0',
-  entry_point='puppersim.pupper_gym_env:PupperGymEnv',
+  entry_point=make_env(gin_file="pupper_pmtg_stand.gin", render_mode='rgb_array', render=False),
   max_episode_steps=1000,
-  reward_threshold=-1,
+  reward_threshold=5.0,
+)
+
+register(
+  id='PupperStandRobotGymEnv-v0',
+  entry_point=make_env(gin_file="pupper_pmtg_stand_robot.gin", render_mode='rgb_array', render=True),
+  max_episode_steps=1000,
+  reward_threshold=5.0,
 )
 
 register(

@@ -10,14 +10,21 @@ from pybullet_envs.minitaur.envs_v2 import env_loader
 import puppersim.data as pd
 from typing import Optional
 
-def create_pupper_env():
+def make_env(gin_file="pupper_pmtg.gin", render_mode: Optional[str] = None, render=False):
+  def _init():
+    return PupperGymEnv(render_mode=render_mode, render=render, gin_file=gin_file)
+  return _init
+  
+
+def create_pupper_env(gin_file, render):
   CONFIG_DIR = puppersim.getPupperSimPath()
-  _CONFIG_FILE = os.path.join(CONFIG_DIR, "config", "pupper_pmtg_stand.gin")
+  _CONFIG_FILE = os.path.join(CONFIG_DIR, "config", gin_file)
   #  _NUM_STEPS = 10000
   #  _ENV_RANDOM_SEED = 2
 
   gin.bind_parameter("scene_base.SceneBase.data_root", pd.getDataPath()+"/")
   gin.parse_config_file(_CONFIG_FILE)
+  gin.bind_parameter("SimulationParameters.enable_rendering", render)
   env = env_loader.load()
   return env
 
@@ -28,8 +35,8 @@ class PupperGymEnv(Env):
     "render_fps": 50,
   }
 
-  def __init__(self, render_mode: Optional[str] = None, render=False):
-    self.env = create_pupper_env()
+  def __init__(self, render_mode: Optional[str] = None, render=False, gin_file="pupper_pmtg.gin"):
+    self.env = create_pupper_env(gin_file, render)
     self.observation_space = self.env.observation_space
     self.action_space = self.env.action_space
     self._is_render = render
