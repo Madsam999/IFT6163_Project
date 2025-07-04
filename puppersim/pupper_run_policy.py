@@ -9,12 +9,11 @@ import numpy as np
 
 @dataclass
 class Args:
-  model_path: str = ""
+  model_path = ""
   
 def make_env():
   def thunk():
-    env = gym.make("PupperStandGymEnv-v0")
-    env = gym.wrappers.FlattenObservation(env)
+    env = gym.make("PupperStandRobotGymEnv-v0")
     env = gym.wrappers.RecordEpisodeStatistics(env)
     env = gym.wrappers.ClipAction(env)
     env = gym.wrappers.NormalizeObservation(env)
