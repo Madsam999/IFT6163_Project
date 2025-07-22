@@ -45,8 +45,12 @@ class Args:
     """Team/entity for wandb logging"""
     capture_video: bool = False
     """If True, record videos of the agent's performance"""
+    video_trigger: int = 0
+    """Trigger videos at every x episodes"""
     save_model: bool = False
     """If True, save the trained model to disk"""
+    eval_episodes: int = 10
+    """Number of eval episodes"""
     upload_model: bool = False
     """If True, upload the model to HuggingFace Hub"""
     hf_entity: str = ""
@@ -109,7 +113,11 @@ def make_env(env_id, idx, capture_video, run_name, gamma):
         # If capturing video, only record from the first environment
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode='rgb_array')
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+            video_trigger = args.video_trigger
+            if video_trigger > 0:
+                env = gym.wrappers.RecordVideo(env, f"videos/{run_name}",episode_trigger=lambda episode_id: episode_id % video_trigger == 0)
+            else:
+                env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")                
         else:
             env = gym.make(env_id)
         # Flatten observations (useful if the environment returns a dictionary of observations)
@@ -208,7 +216,7 @@ if __name__ == "__main__":
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
     # Create a unique name for this run (for logging and saving)
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{time.strftime('%Y-%m-%d_%H:%M:%S', time.gmtime(time.time()))}"
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{time.strftime('%Y-%m-%d_%H:%M:%S', time.localtime(time.time()))}"
 
     # If tracking with wandb, initialize it
     if args.track:
@@ -433,7 +441,7 @@ if __name__ == "__main__":
             model_path,
             make_env,
             args.env_id,
-            eval_episodes=1000,
+            eval_episodes=args.eval_episodes,
             run_name=f"{run_name}-eval",
             Model=Agent,
             device=device,

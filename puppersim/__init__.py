@@ -15,6 +15,12 @@ register(
   reward_threshold=5.0,
 )
 
+register(
+    id='PupperGymEnvLong-v0',
+    entry_point='puppersim.pupper_gym_env:PupperGymEnv',
+    max_episode_steps=1000,
+    reward_threshold=5.0,
+)
 
 def getPupperSimPath():
     resdir = os.path.join(os.path.dirname(__file__))
