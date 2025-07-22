@@ -12,7 +12,7 @@ import pybullet_envs.minitaur.robots.robot_urdf_loader
 
 import puppersim.pupper_motor_model
 import puppersim.pupper_constants
-import puppersim.pupper_standing_task
+import puppersim.pupper_four_leg_stand_task
 import puppersim.pupper_terminal_conditions
 import puppersim.speed_task
 
@@ -78,11 +78,12 @@ locomotion_gym_env.LocomotionGymEnv.robot_class = @pupper_v2.Pupper
 
 # Specify the task.
 # Have to add LastAction sensor before using
-pupper_standing_task.StandingTask.energy_penalty_coef = 0.0
-pupper_standing_task.StandingTask.min_com_height = 0.15
-pupper_standing_task.StandingTask.torque_penalty_coef = 0.0001
-locomotion_gym_env.LocomotionGymEnv.task = @pupper_standing_task.StandingTask()
-pupper_standing_task.StandingTask.terminal_condition = @pupper_terminal_conditions.default_terminal_condition_for_pupper
+pupper_four_leg_stand_task.PupperFourLegStandTask.energy_penalty_coef = 0.0
+pupper_four_leg_stand_task.PupperFourLegStandTask.upright_threshold = 0.95
+pupper_four_leg_stand_task.PupperFourLegStandTask.min_com_height = 0.15
+pupper_four_leg_stand_task.PupperFourLegStandTask.torque_penalty_coef = 0.0001
+locomotion_gym_env.LocomotionGymEnv.task = @pupper_four_leg_stand_task.PupperFourLegStandTask()
+pupper_four_leg_stand_task.PupperFourLegStandTask.terminal_condition = @pupper_terminal_conditions.default_terminal_condition_for_pupper
 
 
 #speed_task.SpeedRewardTask.min_com_height = 0.0
