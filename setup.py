@@ -48,8 +48,13 @@ setup(
         "scipy",
         "pyserial",
         "moviepy",
-        "pupper_hardware_interface @ git+https://github.com/stanfordroboticsclub/Pupper-V2-Interface.git",
     ],
+    extras_require={
+        # Only needed when deploying to the physical Pupper robot
+        "hardware": [
+            "pupper_hardware_interface @ git+https://github.com/stanfordroboticsclub/Pupper-V2-Interface.git",
+        ],
+    },
     classifiers=[
         "Development Status :: 4 - Beta",
         "Intended Audience :: Developers",

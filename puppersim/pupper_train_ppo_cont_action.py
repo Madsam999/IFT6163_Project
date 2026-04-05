@@ -14,6 +14,8 @@ import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 
+from puppersim.icm import ICMModule
+
 
 @dataclass
 class Args:
@@ -76,6 +78,24 @@ class Args:
     target_kl: float = None
     """the target KL divergence threshold"""
 
+    # ICM arguments
+    use_icm: bool = False
+    """if toggled, use the Intrinsic Curiosity Module to augment rewards"""
+    icm_feature_dim: int = 64
+    """size of the ICM feature embedding"""
+    icm_lr: float = 3e-4
+    """learning rate for the ICM optimiser"""
+    icm_eta: float = 0.01
+    """scales the forward-error intrinsic reward (r_int = eta/2 * ||phi_hat - phi||^2)"""
+    icm_lam: float = 0.2
+    """balance between inverse and forward loss: L=(1-lam)*L_fwd + lam*L_inv"""
+    icm_beta: float = 1.0
+    """initial weight of the intrinsic reward: r = r_ext + beta * r_int"""
+    icm_beta_final: float = 0.0
+    """final value of beta after decay (set > 0 to keep some curiosity throughout)"""
+    icm_beta_decay_frac: float = 0.7
+    """fraction of total iterations over which beta decays from icm_beta to icm_beta_final"""
+
     # to be filled in runtime
     batch_size: int = 0
     """the batch size (computed in runtime)"""
@@ -96,7 +116,7 @@ def make_env(env_id, idx, capture_video, run_name, gamma):
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ClipAction(env)
         env = gym.wrappers.NormalizeObservation(env)
-        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
+        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10), observation_space=env.observation_space)
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
         env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         return env
@@ -142,6 +162,16 @@ class Agent(nn.Module):
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
 
+def compute_beta(iteration: int, num_iterations: int,
+                 beta_start: float, beta_final: float, decay_frac: float) -> float:
+    """Linearly decay beta from beta_start to beta_final over the first decay_frac of training."""
+    decay_steps = int(num_iterations * decay_frac)
+    if iteration >= decay_steps:
+        return beta_final
+    t = iteration / decay_steps
+    return beta_start + t * (beta_final - beta_start)
+
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
     args.batch_size = int(args.num_envs * args.num_steps)
@@ -183,8 +213,26 @@ if __name__ == "__main__":
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
+    obs_dim = int(np.array(envs.single_observation_space.shape).prod())
+    action_dim = int(np.prod(envs.single_action_space.shape))
+
+    # ICM setup
+    icm = None
+    icm_optimizer = None
+    if args.use_icm:
+        icm = ICMModule(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            feature_dim=args.icm_feature_dim,
+            eta=args.icm_eta,
+            lam=args.icm_lam,
+        ).to(device)
+        icm_optimizer = optim.Adam(icm.parameters(), lr=args.icm_lr, eps=1e-5)
+        print(f"ICM enabled: feature_dim={args.icm_feature_dim}, beta={args.icm_beta} -> {args.icm_beta_final}")
+
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
+    next_obs_buf = torch.zeros_like(obs)  # stores s_{t+1} for each step (needed by ICM)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -205,6 +253,10 @@ if __name__ == "__main__":
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
 
+        # Current beta for this iteration
+        beta = compute_beta(iteration - 1, args.num_iterations,
+                            args.icm_beta, args.icm_beta_final, args.icm_beta_decay_frac)
+
         for step in range(0, args.num_steps):
             global_step += args.num_envs
             obs[step] = next_obs
@@ -223,12 +275,29 @@ if __name__ == "__main__":
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
+            # Store next_obs for ICM (done after converting to tensor)
+            next_obs_buf[step] = next_obs
+
             if "final_info" in infos:
                 for info in infos["final_info"]:
                     if info and "episode" in info:
                         print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+
+        # --- ICM: augment rewards with intrinsic signal ---
+        if icm is not None and beta > 0:
+            b_obs_icm = obs.reshape(-1, obs_dim)
+            b_next_obs_icm = next_obs_buf.reshape(-1, obs_dim)
+            b_actions_icm = actions.reshape(-1, action_dim)
+
+            r_int = icm.compute_intrinsic_reward(b_obs_icm, b_next_obs_icm, b_actions_icm)
+            r_int = r_int.reshape(args.num_steps, args.num_envs)
+            rewards = rewards + beta * r_int
+
+            writer.add_scalar("icm/intrinsic_reward_mean", r_int.mean().item(), global_step)
+            writer.add_scalar("icm/intrinsic_reward_max", r_int.max().item(), global_step)
+            writer.add_scalar("icm/beta", beta, global_step)
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -308,6 +377,21 @@ if __name__ == "__main__":
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
 
+        # --- ICM: update networks on the collected rollout (one pass over full batch) ---
+        if icm is not None:
+            icm_optimizer.zero_grad()
+            icm_loss, fwd_loss, inv_loss = icm.compute_loss(
+                obs.reshape(-1, obs_dim),
+                next_obs_buf.reshape(-1, obs_dim),
+                actions.reshape(-1, action_dim),
+            )
+            icm_loss.backward()
+            icm_optimizer.step()
+
+            writer.add_scalar("losses/icm_loss", icm_loss.item(), global_step)
+            writer.add_scalar("losses/icm_forward_loss", fwd_loss.item(), global_step)
+            writer.add_scalar("losses/icm_inverse_loss", inv_loss.item(), global_step)
+
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
@@ -326,7 +410,11 @@ if __name__ == "__main__":
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
-        state_dict = agent.state_dict()
+        state_dict = {
+            "agent": agent.state_dict(),
+        }
+        if icm is not None:
+            state_dict["icm"] = icm.state_dict()
         torch.save(state_dict, model_path)
         print(f"model saved to {model_path}")
         from cleanrl.cleanrl_utils.evals.ppo_eval import evaluate
