@@ -9,6 +9,20 @@ register(
 )
 
 register(
+  id='PupperNavEnv-v0',
+  entry_point='puppersim.pupper_nav_env:PupperNavGymEnv',
+  max_episode_steps=500,
+  reward_threshold=50.0,
+)
+
+register(
+  id='PupperAprilTagNavEnv-v0',
+  entry_point='puppersim.pupper_apriltag_nav_env:PupperAprilTagNavEnv',
+  max_episode_steps=500,
+  reward_threshold=50.0,
+)
+
+register(
   id='ReacherEnv-v0',
   entry_point='puppersim.reacher.reacher_env:ReacherEnv',
   max_episode_steps=150,

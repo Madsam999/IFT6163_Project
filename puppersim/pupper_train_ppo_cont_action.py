@@ -187,7 +187,7 @@ if __name__ == "__main__":
             sync_tensorboard=True,
             config=vars(args),
             name=run_name,
-            monitor_gym=True,
+            monitor_gym=False,
             save_code=True,
         )
     writer = SummaryWriter(f"runs/{run_name}")

@@ -1,0 +1,174 @@
+"""Navigation gymnasium environment for the Pupper quadruped.
+
+The robot must walk from its spawn position to a randomly placed goal marker.
+A red sphere is rendered in PyBullet to indicate the goal.
+
+Observation (19-dim):
+    [0:16]  base pupper obs (12 motor angles + 4 IMU values)
+    [16]    dx to goal in robot-local frame
+    [17]    dy to goal in robot-local frame
+    [18]    Euclidean distance to goal
+
+Reward:
+    Potential-based: (prev_dist - curr_dist) / env_time_step
+    Success bonus:   +50 when within GOAL_RADIUS meters of goal
+
+Episode ends when:
+    - Robot reaches goal (success)
+    - Robot falls (from underlying terminal condition)
+    - Max steps reached (truncation, handled by gymnasium's TimeLimit wrapper)
+"""
+
+import os
+from typing import Optional
+
+import gin
+import numpy as np
+import pybullet as p
+import gymnasium as gym
+from gymnasium import spaces
+
+import puppersim
+import puppersim.data as pd
+from pybullet_envs.minitaur.envs_v2 import env_loader
+from pybullet_envs.minitaur.envs_v2.utilities import env_utils_v2 as env_utils
+
+
+def _create_inner_env(render: bool = False):
+    CONFIG_DIR = puppersim.getPupperSimPath()
+    config_file = os.path.join(CONFIG_DIR, "config", "pupper_pmtg.gin")
+    gin.bind_parameter("scene_base.SceneBase.data_root", pd.getDataPath() + "/")
+    gin.parse_config_file(config_file)
+    gin.bind_parameter("SimulationParameters.enable_rendering", render)
+    return env_loader.load()
+
+
+class PupperNavGymEnv(gym.Env):
+    """Pupper navigation task: walk to a randomly placed goal."""
+
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 50}
+
+    GOAL_RADIUS = 0.35      # metres — success threshold
+    GOAL_MIN_DIST = 1.5     # metres — minimum spawn distance from robot
+    GOAL_MAX_DIST = 3.0     # metres — maximum spawn distance from robot
+
+    def __init__(self, render_mode: Optional[str] = None):
+        self._inner = _create_inner_env(render=render_mode == "human")
+        self.render_mode = render_mode
+
+        # Extend the base observation space with 3 goal-relative dims
+        base_low = self._inner.observation_space.low
+        base_high = self._inner.observation_space.high
+        goal_low = np.full(3, -10.0, dtype=np.float32)
+        goal_high = np.full(3, 10.0, dtype=np.float32)
+
+        self.observation_space = spaces.Box(
+            low=np.concatenate([base_low, goal_low]),
+            high=np.concatenate([base_high, goal_high]),
+            dtype=np.float32,
+        )
+        self.action_space = self._inner.action_space
+
+        self._goal_pos: Optional[np.ndarray] = None
+        self._goal_body_id: Optional[int] = None
+        self._prev_dist: float = 0.0
+        self._rng = np.random.default_rng()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _robot_pos_yaw(self):
+        pos = env_utils.get_robot_base_position(self._inner.robot)
+        _, _, yaw = self._inner.robot.base_roll_pitch_yaw
+        return np.array(pos[:2], dtype=np.float32), yaw
+
+    def _spawn_goal(self):
+        angle = self._rng.uniform(0.0, 2.0 * np.pi)
+        dist = self._rng.uniform(self.GOAL_MIN_DIST, self.GOAL_MAX_DIST)
+        self._goal_pos = np.array(
+            [dist * np.cos(angle), dist * np.sin(angle)], dtype=np.float32
+        )
+
+        client = self._inner._pybullet_client
+
+        # Remove old marker if present
+        if self._goal_body_id is not None:
+            try:
+                client.removeBody(self._goal_body_id)
+            except Exception:
+                pass
+            self._goal_body_id = None
+
+        # Create a red sphere at goal position
+        vis = client.createVisualShape(
+            p.GEOM_SPHERE,
+            radius=self.GOAL_RADIUS,
+            rgbaColor=[1.0, 0.15, 0.15, 0.6],
+        )
+        self._goal_body_id = client.createMultiBody(
+            baseMass=0,
+            baseVisualShapeIndex=vis,
+            basePosition=[self._goal_pos[0], self._goal_pos[1], 0.15],
+        )
+
+    def _goal_observation(self):
+        """Returns (goal_obs[3], distance) where goal_obs is in robot-local frame."""
+        robot_pos, yaw = self._robot_pos_yaw()
+        delta = self._goal_pos - robot_pos
+        dist = float(np.linalg.norm(delta))
+
+        # Rotate delta into robot-local frame by -yaw
+        c, s = np.cos(-yaw), np.sin(-yaw)
+        dx_local = c * delta[0] - s * delta[1]
+        dy_local = s * delta[0] + c * delta[1]
+
+        return np.array([dx_local, dy_local, dist], dtype=np.float32), dist
+
+    def _augment(self, base_obs, goal_obs):
+        return np.concatenate([base_obs, goal_obs]).astype(np.float32)
+
+    # ------------------------------------------------------------------
+    # Gymnasium interface
+    # ------------------------------------------------------------------
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        if seed is not None:
+            self._rng = np.random.default_rng(seed)
+
+        base_obs = self._inner.reset()
+        self._spawn_goal()
+        goal_obs, dist = self._goal_observation()
+        self._prev_dist = dist
+
+        return self._augment(base_obs, goal_obs), {}
+
+    def step(self, action):
+        # Inner env uses old gym API: returns (obs, reward, done, info)
+        base_obs, _task_reward, done, info = self._inner.step(action)
+
+        goal_obs, dist = self._goal_observation()
+
+        # Potential-based dense reward: positive when closing in on goal
+        reward = (self._prev_dist - dist) / self._inner.env_time_step
+        self._prev_dist = dist
+
+        # Success
+        success = dist < self.GOAL_RADIUS
+        if success:
+            reward += 50.0
+            done = True
+
+        info = dict(info) if info else {}
+        info["success"] = success
+        info["dist_to_goal"] = dist
+
+        obs = self._augment(base_obs, goal_obs)
+        return obs, reward, bool(done), False, info
+
+    def render(self):
+        return self._inner.render("rgb_array")
+
+    def close(self):
+        self._inner.close()
