@@ -1,0 +1,21 @@
+2026-04-08 14:21:26,856 INFO    MainThread:3766566 [wandb_setup.py:_flush():81] Current SDK version is 0.25.1
+2026-04-08 14:21:26,856 INFO    MainThread:3766566 [wandb_setup.py:_flush():81] Configure stats pid to 3766566
+2026-04-08 14:21:26,856 INFO    MainThread:3766566 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-04-08 14:21:26,856 INFO    MainThread:3766566 [wandb_init.py:setup_run_log_directory():717] Logging user logs to /home/emiliano/experiments/robots/IFT6163_Project/wandb/run-20260408_142126-h1mmyl1t/logs/debug.log
+2026-04-08 14:21:26,856 INFO    MainThread:3766566 [wandb_init.py:setup_run_log_directory():718] Logging internal logs to /home/emiliano/experiments/robots/IFT6163_Project/wandb/run-20260408_142126-h1mmyl1t/logs/debug-internal.log
+2026-04-08 14:21:26,875 INFO    MainThread:3766566 [wandb_init.py:init():844] calling init triggers
+2026-04-08 14:21:26,875 INFO    MainThread:3766566 [wandb_init.py:init():849] wandb.init called with sweep_config: {}
+config: {'exp_name': 'pupper_train_ppo_brax', 'seed': 1, 'track': True, 'wandb_project_name': 'pupper', 'wandb_entity': '', 'save_model': True, 'save_checkpoints': True, 'checkpoint_interval': 10000000, 'checkpoint_dirname': 'checkpoints', 'env_name': 'pupper_v2', 'backend': 'mjx', 'env_kwargs': 'puppersim/config/pupper_brax_env_kwargs.command_locomotion.json', 'custom_env_module': 'puppersim.pupper_brax_env_v2', 'custom_env_class': 'PupperV2BraxEnv', 'randomization_module': 'puppersim.pupper_brax_domain_randomization', 'randomization_fn': 'domain_randomize', 'randomization_kwargs': 'puppersim/config/pupper_brax_randomization_kwargs.v3like.json', 'num_timesteps': 200000000, 'episode_length': 500, 'num_evals': 11, 'reward_scaling': 1.0, 'normalize_observations': True, 'action_repeat': 1, 'unroll_length': 20, 'num_minibatches': 32, 'num_updates_per_batch': 4, 'discounting': 0.97, 'learning_rate': 3e-05, 'entropy_cost': 0.01, 'num_envs': 8192, 'batch_size': 256, 'network_hidden_sizes': '256,128,128,128', 'activation': 'elu', 'save_policy_inference_fn': False, 'capture_video': False, 'capture_video_during_training': False, 'video_interval_steps': 10000000, 'video_max_count': 3, 'video_steps': 1000, 'video_width': 640, 'video_height': 480, 'video_camera': 'tracking_cam', 'video_fps': 0, 'video_dirname': 'videos', '_wandb': {'code_path': 'code/puppersim/pupper_train_ppo_brax.py'}}
+2026-04-08 14:21:26,875 INFO    MainThread:3766566 [wandb_init.py:init():892] starting backend
+2026-04-08 14:21:27,093 INFO    MainThread:3766566 [wandb_init.py:init():895] sending inform_init request
+2026-04-08 14:21:27,096 INFO    MainThread:3766566 [wandb_init.py:init():903] backend started and connected
+2026-04-08 14:21:27,097 INFO    MainThread:3766566 [wandb_init.py:init():973] updated telemetry
+2026-04-08 14:21:27,100 INFO    MainThread:3766566 [wandb_init.py:init():997] communicating run to backend with 90.0 second timeout
+2026-04-08 14:21:28,000 INFO    MainThread:3766566 [wandb_init.py:init():1042] starting run threads in backend
+2026-04-08 14:21:28,070 INFO    MainThread:3766566 [wandb_run.py:_console_start():2524] atexit reg
+2026-04-08 14:21:28,071 INFO    MainThread:3766566 [wandb_run.py:_redirect():2373] redirect: wrap_raw
+2026-04-08 14:21:28,071 INFO    MainThread:3766566 [wandb_run.py:_redirect():2442] Wrapping output streams.
+2026-04-08 14:21:28,071 INFO    MainThread:3766566 [wandb_run.py:_redirect():2465] Redirects installed.
+2026-04-08 14:21:28,073 INFO    MainThread:3766566 [wandb_init.py:init():1082] run started, returning control to user process
+2026-04-08 14:22:11,200 INFO    wandb-AsyncioManager-main:3766566 [service_client.py:_forward_responses():134] Reached EOF.
+2026-04-08 14:22:11,200 INFO    wandb-AsyncioManager-main:3766566 [mailbox.py:close():155] Closing mailbox, abandoning 1 handles.

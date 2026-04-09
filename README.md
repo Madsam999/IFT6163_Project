@@ -67,6 +67,27 @@ python puppersim/pupper_train_ppo_cont_action.py --seed 1 --env-id PupperGymEnv-
 ```
 Depending on your computer specs, each training iteration will take around 1 - 5 seconds.
 
+### MJX/Brax PPO training
+You can also train Pupper v2 with Brax PPO on MJX backends:
+```bash
+pip install "jax[cpu]" brax mujoco flax orbax-checkpoint tyro
+python puppersim/pupper_train_ppo_brax.py --env-name pupper_v2 --backend mjx
+```
+
+Requires Python 3.10+ (MJX is not supported on Python 3.7).
+
+The trainer uses local Pupper v2 assets from this repo only.
+It auto-generates `puppersim/data/pupper_v2a_mjx.xml` from
+`puppersim/data/pupper_v2a.urdf` if the MJCF file is missing.
+
+If you want to generate/update the MJCF manually:
+```bash
+python puppersim/pupper_v2_urdf_to_mjcf.py \
+  --urdf-path puppersim/data/pupper_v2a.urdf \
+  --output-path puppersim/data/pupper_v2a_mjx.xml
+```
+`pupper_v2_urdf_to_mjcf.py` applies MJX-compatible geometry/contact settings by default.
+
 ### Troubleshooting
 <details>
 <summary>Click to expand</summary>
@@ -131,10 +152,56 @@ cat ~/.ssh/id_rsa.pub | ssh pi@raspberrypi.local 'mkdir -p .ssh/ && cat >> .ssh/
 ### Run pretrained policy on Pupper
 * Turn on the Pupper robot, wait for it to complete the calibration motion.
 * Connect your laptop with the Pupper using an USB-C cable
-* Run the following command on your laptop:
+* For legacy PyBullet policies (`lin_policy_plus_*.npz`), run:
 ```bash
 ./deploy_to_robot.sh python3 puppersim/puppersim/pupper_ars_run_policy.py --expert_policy_file=puppersim/data/lin_policy_plus_latest.npz --json_file=puppersim/data/params.json --run_on_robot
 ```
+
+### Run Brax PPO locomotion policy on the real robot (simple flow)
+This is the recommended path for checkpoints like:
+`puppersim/data/pretrained_cc_locomotion/pupper_train_ppo_brax.params`
+
+1. Export a policy bundle (only needed once per checkpoint):
+```bash
+python3 puppersim/pupper_brax_export_policy_bundle.py \
+  --params-path puppersim/data/pretrained_cc_locomotion/pupper_train_ppo_brax.params \
+  --output-dir puppersim/data/pretrained_cc_locomotion
+```
+
+2. Deploy and run on robot:
+```bash
+./deploy_to_robot.sh python3 puppersim/pupper_brax_run_policy_robot.py \
+  --checkpoint-dir puppersim/data/pretrained_cc_locomotion \
+  --seconds 60 \
+  --command-x 0.35 \
+  --command-y 0.0 \
+  --command-yaw 0.0
+```
+
+Realtime command options:
+* Fixed command (default): keep `--command-source fixed` (or omit).
+* Keyboard control:
+```bash
+./deploy_to_robot.sh python3 puppersim/pupper_brax_run_policy_robot.py \
+  --checkpoint-dir puppersim/data/pretrained_cc_locomotion \
+  --command-source keyboard \
+  --keyboard-control-mode hold \
+  --seconds 120
+```
+Controls: `W/S` -> `vx`, `A/D` -> `vy`, `Q/E` -> yaw, `SPACE` -> zero, `X` -> stop.
+
+* HID joystick control (FrSky/BetaFPV, via `puppersim/JoystickInterface.py`):
+```bash
+./deploy_to_robot.sh python3 puppersim/pupper_brax_run_policy_robot.py \
+  --checkpoint-dir puppersim/data/pretrained_cc_locomotion \
+  --command-source joystick \
+  --seconds 120
+```
+
+Notes:
+* The runner also supports `--auto-export` from `.params` if bundle files are missing.
+* Start with small commands (`--command-x 0.2` to `0.35`) and short runs (`--seconds 15`) first.
+* Control rate defaults to `--policy-dt 0.02` (50 Hz), matching the command-locomotion Brax setup.
 
 ## Simulating the heuristic controller
 <details>

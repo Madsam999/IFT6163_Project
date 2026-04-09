@@ -1,0 +1,252 @@
+"""Play a trained PPO policy with keyboard command control."""
+
+import argparse
+import os
+import sys
+import time
+
+import gymnasium as gym
+import numpy as np
+import pybullet as p
+import torch
+import torch.nn as nn
+
+# Ensure local package imports when executed as:
+# `python puppersim/pupper_play_policy_keyboard.py`
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _REPO_ROOT not in sys.path:
+  sys.path.insert(0, _REPO_ROOT)
+
+import puppersim  # noqa: E402
+
+
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+  torch.nn.init.orthogonal_(layer.weight, std)
+  torch.nn.init.constant_(layer.bias, bias_const)
+  return layer
+
+
+class Agent(nn.Module):
+  def __init__(self, obs_shape, act_shape):
+    super().__init__()
+    obs_dim = int(np.array(obs_shape).prod())
+    act_dim = int(np.prod(act_shape))
+    self.critic = nn.Sequential(
+        layer_init(nn.Linear(obs_dim, 64)),
+        nn.Tanh(),
+        layer_init(nn.Linear(64, 64)),
+        nn.Tanh(),
+        layer_init(nn.Linear(64, 1), std=1.0),
+    )
+    self.actor_mean = nn.Sequential(
+        layer_init(nn.Linear(obs_dim, 64)),
+        nn.Tanh(),
+        layer_init(nn.Linear(64, 64)),
+        nn.Tanh(),
+        layer_init(nn.Linear(64, act_dim), std=0.01),
+    )
+    # Kept to match training architecture checkpoints.
+    self.actor_logstd = nn.Parameter(torch.zeros(1, act_dim))
+
+  def act_deterministic(self, x):
+    return self.actor_mean(x)
+
+
+def _find_command_task(env):
+  """Best-effort traversal to find the task object exposing set_command()."""
+  candidates = []
+  current = env
+  for _ in range(20):
+    if current is None:
+      break
+    candidates.append(current)
+    next_env = getattr(current, "env", None)
+    if next_env is current:
+      break
+    current = next_env
+
+  for obj in candidates:
+    for attr in ("task", "_task"):
+      task = getattr(obj, attr, None)
+      if task is not None and hasattr(task, "set_command"):
+        return task
+  return None
+
+
+def _find_env_dt(env, default_dt=0.01):
+  current = env
+  for _ in range(20):
+    if current is None:
+      break
+    for attr in ("env_time_step", "_env_time_step"):
+      value = getattr(current, attr, None)
+      if isinstance(value, (float, int)) and value > 0:
+        return float(value)
+    next_env = getattr(current, "env", None)
+    if next_env is current:
+      break
+    current = next_env
+  return float(default_dt)
+
+
+def _load_state_dict(model_path):
+  loaded = torch.load(model_path, map_location=torch.device("cpu"))
+  if isinstance(loaded, dict) and "model_state_dict" in loaded:
+    return loaded["model_state_dict"]
+  return loaded
+
+
+def _clip_command(cmd, x_range, y_range, yaw_range):
+  cmd[0] = np.clip(cmd[0], x_range[0], x_range[1])
+  cmd[1] = np.clip(cmd[1], y_range[0], y_range[1])
+  cmd[2] = np.clip(cmd[2], yaw_range[0], yaw_range[1])
+  return cmd
+
+
+def _find_pybullet_client(env):
+  current = env
+  for _ in range(30):
+    if current is None:
+      break
+    for attr in ("pybullet_client", "_pybullet_client"):
+      client = getattr(current, attr, None)
+      if client is not None and hasattr(client, "getKeyboardEvents"):
+        return client
+    next_env = getattr(current, "env", None)
+    if next_env is current:
+      break
+    current = next_env
+  return None
+
+
+def _is_key_down(events, key_code, key_is_down, key_was_triggered):
+  value = events.get(key_code, 0)
+  return bool((value & key_is_down) or (value & key_was_triggered))
+
+
+def _read_gui_command(client, x_speed, y_speed, yaw_speed, x_range, y_range, yaw_range):
+  """Reads held keys from PyBullet GUI. If no key is held, command is zero."""
+  events = client.getKeyboardEvents()
+  key_down = getattr(client, "KEY_IS_DOWN", p.KEY_IS_DOWN)
+  key_triggered = getattr(client, "KEY_WAS_TRIGGERED", p.KEY_WAS_TRIGGERED)
+
+  cmd = np.zeros(3, dtype=np.float64)
+
+  # Forward/backward: Up/Down arrows or W/S.
+  if _is_key_down(events, p.B3G_UP_ARROW, key_down, key_triggered) or _is_key_down(events, ord("w"), key_down, key_triggered):
+    cmd[0] += x_speed
+  if _is_key_down(events, p.B3G_DOWN_ARROW, key_down, key_triggered) or _is_key_down(events, ord("s"), key_down, key_triggered):
+    cmd[0] -= x_speed
+
+  # Lateral: Left/Right arrows or A/D.
+  if _is_key_down(events, p.B3G_LEFT_ARROW, key_down, key_triggered) or _is_key_down(events, ord("a"), key_down, key_triggered):
+    cmd[1] += y_speed
+  if _is_key_down(events, p.B3G_RIGHT_ARROW, key_down, key_triggered) or _is_key_down(events, ord("d"), key_down, key_triggered):
+    cmd[1] -= y_speed
+
+  # Yaw: Q/E.
+  if _is_key_down(events, ord("q"), key_down, key_triggered):
+    cmd[2] += yaw_speed
+  if _is_key_down(events, ord("e"), key_down, key_triggered):
+    cmd[2] -= yaw_speed
+
+  return _clip_command(cmd, x_range, y_range, yaw_range)
+
+
+def parse_args():
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--model-path", type=str, required=True, help="Path to .cleanrl_model or checkpoint .pt")
+  parser.add_argument("--env-id", type=str, default="PupperCommandLocomotionEnv-v0")
+  parser.add_argument("--seed", type=int, default=1)
+  parser.add_argument("--realtime", action="store_true", help="Sync to env dt wall-clock.")
+  parser.add_argument("--max-steps", type=int, default=200000)
+
+  parser.add_argument("--x-speed", type=float, default=0.5, help="Commanded |vx| while forward/backward key is held.")
+  parser.add_argument("--y-speed", type=float, default=0.3, help="Commanded |vy| while left/right key is held.")
+  parser.add_argument("--yaw-speed", type=float, default=1.0, help="Commanded |yaw_rate| while q/e is held.")
+  parser.add_argument("--lin-x-min", type=float, default=-0.75)
+  parser.add_argument("--lin-x-max", type=float, default=0.75)
+  parser.add_argument("--lin-y-min", type=float, default=-0.5)
+  parser.add_argument("--lin-y-max", type=float, default=0.5)
+  parser.add_argument("--yaw-min", type=float, default=-2.0)
+  parser.add_argument("--yaw-max", type=float, default=2.0)
+  return parser.parse_args()
+
+
+def main():
+  args = parse_args()
+  env = gym.make(args.env_id, render_mode="human")
+  env.reset(seed=args.seed)
+
+  model = Agent(env.observation_space.shape, env.action_space.shape)
+  state_dict = _load_state_dict(args.model_path)
+  missing, unexpected = model.load_state_dict(state_dict, strict=False)
+  if missing:
+    print(f"warning: missing keys in checkpoint load: {missing}")
+  if unexpected:
+    print(f"warning: unexpected keys in checkpoint load: {unexpected}")
+  model.eval()
+
+  task = _find_command_task(env.unwrapped)
+  if task is None:
+    raise RuntimeError("Could not find locomotion task with set_command() in environment.")
+  client = _find_pybullet_client(env.unwrapped)
+  if client is None:
+    raise RuntimeError("Could not find PyBullet client for GUI keyboard input.")
+
+  cmd = np.zeros(3, dtype=np.float64)
+  task.set_command(cmd)
+  print("GUI keyboard control (hold keys):")
+  print("  up/down or w/s -> vx")
+  print("  left/right or a/d -> vy")
+  print("  q/e -> yaw rate")
+  print("  releasing keys returns command to zero")
+
+  obs, _ = env.reset(seed=args.seed)
+  wall_start = time.time()
+  last_print = time.time()
+  env_dt = _find_env_dt(env.unwrapped, default_dt=0.01)
+
+  x_range = (args.lin_x_min, args.lin_x_max)
+  y_range = (args.lin_y_min, args.lin_y_max)
+  yaw_range = (args.yaw_min, args.yaw_max)
+
+  for step in range(args.max_steps):
+    cmd = _read_gui_command(
+        client,
+        args.x_speed,
+        args.y_speed,
+        args.yaw_speed,
+        x_range,
+        y_range,
+        yaw_range,
+    )
+    task.set_command(cmd)
+
+    obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+    with torch.no_grad():
+      action = model.act_deterministic(obs_tensor).squeeze(0).cpu().numpy()
+    action = np.clip(action, env.action_space.low, env.action_space.high)
+
+    obs, _, terminated, truncated, _ = env.step(action)
+    env.render()
+
+    if time.time() - last_print > 0.5:
+      print(f"step={step} command=[{cmd[0]:+.2f}, {cmd[1]:+.2f}, {cmd[2]:+.2f}]")
+      last_print = time.time()
+
+    if args.realtime:
+      target_elapsed = (step + 1) * env_dt
+      sleep_time = target_elapsed - (time.time() - wall_start)
+      if sleep_time > 0:
+        time.sleep(sleep_time)
+
+    if terminated or truncated:
+      obs, _ = env.reset()
+      task.set_command(cmd)
+
+  env.close()
+
+
+if __name__ == "__main__":
+  main()

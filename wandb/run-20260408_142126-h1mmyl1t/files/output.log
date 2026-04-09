@@ -1,0 +1,32 @@
+/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/brax/io/mjcf.py:480: UserWarning: Brax System, piplines and environments are not actively being maintained. Please see MJX for a well maintained JAX-based physics engine: https://github.com/google-deepmind/mujoco/tree/main/mjx. For a host of environments that use MJX, see: https://github.com/google-deepmind/mujoco_playground.
+  warnings.warn(
+jax.errors.SimplifiedTraceback: For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/emiliano/experiments/robots/IFT6163_Project/puppersim/pupper_train_ppo_brax.py", line 495, in <module>
+    train_output = ppo_train(environment=env, **filtered_train_kwargs)
+  File "/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/brax/training/agents/ppo/train.py", line 782, in train
+    metrics = evaluator.run_evaluation(
+  File "/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/brax/training/acting.py", line 146, in run_evaluation
+    eval_state = self._generate_eval_unroll(
+  File "/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/brax/training/acting.py", line 123, in generate_eval_unroll
+    return generate_unroll(
+  File "/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/brax/training/acting.py", line 73, in generate_unroll
+    (final_state, _), data = jax.lax.scan(
+  File "/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/brax/training/acting.py", line 67, in f
+    nstate, transition = actor_step(
+  File "/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/brax/training/acting.py", line 42, in actor_step
+    nstate = env.step(env_state, actions)
+  File "/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/brax/envs/wrappers/training.py", line 200, in step
+    nstate = self.env.step(state, action)
+  File "/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/brax/envs/wrappers/training.py", line 144, in step
+    state = self.env.step(state, action)
+  File "/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/brax/envs/wrappers/training.py", line 103, in step
+    state, rewards = jax.lax.scan(f, state, (), self.action_repeat)
+TypeError: scan body function carry input and carry output must have the same pytree structure, but they differ:
+
+The input carry component state.metrics is a <class 'dict'> with 18 children but the corresponding component of the carry output is a <class 'dict'> with 22 children, so the numbers of children do not match, with the symmetric difference of key sets: {'reward_tracking_lin_vel' 'reward_tracking_ang_vel' 'reward_feet_air_time' 'reward_orientation'}.
+
+Revise the function so that the carry output has the same pytree structure as the carry input.

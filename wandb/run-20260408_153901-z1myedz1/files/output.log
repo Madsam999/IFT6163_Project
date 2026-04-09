@@ -1,0 +1,69 @@
+/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/brax/io/mjcf.py:480: UserWarning: Brax System, piplines and environments are not actively being maintained. Please see MJX for a well maintained JAX-based physics engine: https://github.com/google-deepmind/mujoco/tree/main/mjx. For a host of environments that use MJX, see: https://github.com/google-deepmind/mujoco_playground.
+  warnings.warn(
+[34m[1mwandb[0m: [33mWARNING[0m Step cannot be set when using tensorboard syncing. Please use `run.define_metric(...)` to define a custom metric to log your step values.
+num_steps=0, SPS=0, eval/episode_reward=-815.198, eval/episode_reward_std=529.526
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000050135040.params (flax-bytes)
+/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/subprocess.py:1796: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = _posixsubprocess.fork_exec(
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000050135040.mp4
+num_steps=50135040, SPS=44656, eval/episode_reward=886.283, eval/episode_reward_std=181.335
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000100270080.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000100270080.mp4
+num_steps=100270080, SPS=48062, eval/episode_reward=975.209, eval/episode_reward_std=199.614
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000150405120.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000150405120.mp4
+num_steps=150405120, SPS=49308, eval/episode_reward=1080.777, eval/episode_reward_std=184.331
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000200540160.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000200540160.mp4
+num_steps=200540160, SPS=49960, eval/episode_reward=1166.209, eval/episode_reward_std=203.249
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000250675200.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000250675200.mp4
+num_steps=250675200, SPS=50362, eval/episode_reward=1236.628, eval/episode_reward_std=202.891
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000300810240.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000300810240.mp4
+num_steps=300810240, SPS=50638, eval/episode_reward=1293.273, eval/episode_reward_std=197.969
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000350945280.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000350945280.mp4
+num_steps=350945280, SPS=50524, eval/episode_reward=1315.148, eval/episode_reward_std=146.692
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000401080320.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000401080320.mp4
+num_steps=401080320, SPS=50360, eval/episode_reward=1290.324, eval/episode_reward_std=188.182
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000451215360.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000451215360.mp4
+num_steps=451215360, SPS=50239, eval/episode_reward=1309.096, eval/episode_reward_std=204.035
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000501350400.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000501350400.mp4
+num_steps=501350400, SPS=50143, eval/episode_reward=1317.774, eval/episode_reward_std=172.905
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000551485440.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000551485440.mp4
+num_steps=551485440, SPS=50056, eval/episode_reward=1335.211, eval/episode_reward_std=186.534
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000601620480.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000601620480.mp4
+num_steps=601620480, SPS=49988, eval/episode_reward=1338.934, eval/episode_reward_std=185.868
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000651755520.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000651755520.mp4
+num_steps=651755520, SPS=49929, eval/episode_reward=1359.990, eval/episode_reward_std=162.752
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000701890560.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000701890560.mp4
+num_steps=701890560, SPS=49871, eval/episode_reward=1339.030, eval/episode_reward_std=192.534
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000752025600.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000752025600.mp4
+num_steps=752025600, SPS=49828, eval/episode_reward=1333.142, eval/episode_reward_std=217.857
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000802160640.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000802160640.mp4
+num_steps=802160640, SPS=49785, eval/episode_reward=1365.422, eval/episode_reward_std=153.047
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000852295680.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000852295680.mp4
+num_steps=852295680, SPS=49778, eval/episode_reward=1348.284, eval/episode_reward_std=198.405
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000902430720.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000902430720.mp4
+num_steps=902430720, SPS=49744, eval/episode_reward=1365.184, eval/episode_reward_std=194.531
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_000952565760.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_000952565760.mp4
+num_steps=952565760, SPS=49716, eval/episode_reward=1368.323, eval/episode_reward_std=157.979
+checkpoint saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/checkpoints/pupper_train_ppo_brax_step_001002700800.params (flax-bytes)
+training video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_step_001002700800.mp4
+num_steps=1002700800, SPS=49680, eval/episode_reward=1373.852, eval/episode_reward_std=195.368
+training complete in 20184.1s
+model saved to runs/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax.params (flax-bytes)
+video saved to videos/pupper_v2__pupper_train_ppo_brax__20260408-153900/pupper_train_ppo_brax_final.mp4
