@@ -4,3 +4,6 @@ data
 *.egg-info
 __pycache__
 .codex
+*.mp4
+wandb*
+runs/*
