@@ -1,0 +1,367 @@
+"""Command-conditioned low-level locomotion task."""
+
+from __future__ import annotations
+
+from typing import List, Optional, Sequence
+
+import gin
+import numpy as np
+
+from pybullet_envs.minitaur.envs_v2.sensors import sensor
+from pybullet_envs.minitaur.envs_v2.tasks import terminal_conditions
+
+from puppersim.pupper_tasks.locomotion_task.rewards import manager as reward_manager
+from puppersim.pupper_tasks.locomotion_task.rewards import state as state_utils
+from puppersim.pupper_tasks.locomotion_task.rewards import terms
+
+
+@gin.configurable
+class CommandLocomotionTask(sensor.BoxSpaceSensor):
+  """Low-level locomotion task with modular weighted rewards."""
+
+  def __init__(
+      self,
+      terminal_condition=terminal_conditions.default_terminal_condition_for_minitaur,
+      min_com_height: Optional[float] = 0.0,
+      episode_length: int = 150,
+      resample_velocity_step: Optional[int] = None,
+      lin_vel_x_range: Sequence[float] = (-0.75, 0.75),
+      lin_vel_y_range: Sequence[float] = (-0.5, 0.5),
+      ang_vel_yaw_range: Sequence[float] = (-2.0, 2.0),
+      zero_command_probability: float = 0.02,
+      stand_still_command_threshold: float = 0.05,
+      command_seed: int = 0,
+      tracking_sigma_lin: float = 0.25,
+      tracking_sigma_ang: float = 0.25,
+      feet_air_time_minimum: float = 0.10,
+      w_track_lin_vel_xy: float = 2.0,
+      w_track_ang_vel_z: float = 0.5,
+      w_feet_air_time: float = 0.2,
+      w_lin_vel_z: float = -0.2,
+      w_ang_vel_xy: float = -0.05,
+      w_orientation: float = -0.5,
+      w_torques: float = -2e-4,
+      w_mechanical_work: float = -1e-3,
+      w_joint_acceleration: float = -1e-7,
+      w_action_rate: float = -0.01,
+      w_foot_slip: float = -0.05,
+      w_abduction_angle: float = -0.05,
+      w_stand_still: float = -0.05,
+      w_collision: float = -0.1,
+      w_termination: float = -1.0,
+  ):
+    self._terminal_condition = terminal_condition
+    self._min_com_height = min_com_height
+
+    self._episode_length = int(episode_length)
+    self._resample_velocity_step = (
+        int(resample_velocity_step)
+        if resample_velocity_step is not None
+        else max(1, self._episode_length // 2)
+    )
+    self._lin_vel_x_range = tuple(lin_vel_x_range)
+    self._lin_vel_y_range = tuple(lin_vel_y_range)
+    self._ang_vel_yaw_range = tuple(ang_vel_yaw_range)
+    self._zero_command_probability = float(zero_command_probability)
+    self._stand_still_command_threshold = float(stand_still_command_threshold)
+    self._rng = np.random.default_rng(command_seed)
+
+    self._env = None
+    self._command = np.zeros(3, dtype=np.float64)
+    self._use_external_command = False
+    self._step_count = 0
+
+    self._foot_link_ids = np.arange(4, dtype=np.int32)
+    self._foot_air_time = np.zeros(4, dtype=np.float64)
+    self._prev_foot_contacts = np.zeros(4, dtype=bool)
+    self._prev_foot_positions = None
+
+    self._last_motor_velocities = np.zeros(12, dtype=np.float64)
+    self._last_action = np.zeros(12, dtype=np.float64)
+    self._last_last_action = np.zeros(12, dtype=np.float64)
+    self._action_history_sensor = None
+    self._default_pose = np.zeros(12, dtype=np.float64)
+
+    self._last_reward_terms = {}
+
+    self._stand_still_term = reward_manager.RewardTerm(
+        name="stand_still_pose_l1",
+        fn=terms.stand_still_pose_l1,
+        weight=w_stand_still,
+        kwargs={
+            "default_pose": self._default_pose,
+            "command_threshold": self._stand_still_command_threshold,
+        },
+    )
+
+    self._reward_manager = reward_manager.RewardManager(
+        [
+            reward_manager.RewardTerm(
+                name="track_lin_vel_xy_exp",
+                fn=terms.track_lin_vel_xy_exp,
+                weight=w_track_lin_vel_xy,
+                kwargs={"tracking_sigma": tracking_sigma_lin},
+            ),
+            reward_manager.RewardTerm(
+                name="track_ang_vel_z_exp",
+                fn=terms.track_ang_vel_z_exp,
+                weight=w_track_ang_vel_z,
+                kwargs={"tracking_sigma": tracking_sigma_ang},
+            ),
+            reward_manager.RewardTerm(
+                name="feet_air_time",
+                fn=terms.feet_air_time,
+                weight=w_feet_air_time,
+                kwargs={
+                    "minimum_airtime": feet_air_time_minimum,
+                    "command_threshold": self._stand_still_command_threshold,
+                },
+            ),
+            reward_manager.RewardTerm("lin_vel_z_l2", terms.lin_vel_z_l2, w_lin_vel_z),
+            reward_manager.RewardTerm("ang_vel_xy_l2", terms.ang_vel_xy_l2, w_ang_vel_xy),
+            reward_manager.RewardTerm(
+                "orientation_flatness_l2", terms.orientation_flatness_l2, w_orientation
+            ),
+            reward_manager.RewardTerm("torques_l2", terms.torques_l2, w_torques),
+            reward_manager.RewardTerm("mechanical_work_l1", terms.mechanical_work_l1, w_mechanical_work),
+            reward_manager.RewardTerm("joint_acceleration_l2", terms.joint_acceleration_l2, w_joint_acceleration),
+            reward_manager.RewardTerm("action_rate_l2", terms.action_rate_l2, w_action_rate),
+            reward_manager.RewardTerm("foot_slip_l2", terms.foot_slip_l2, w_foot_slip),
+            reward_manager.RewardTerm("abduction_angle_l2", terms.abduction_angle_l2, w_abduction_angle),
+            self._stand_still_term,
+            reward_manager.RewardTerm("undesired_collision_count", terms.undesired_collision_count, w_collision),
+            reward_manager.RewardTerm("termination", terms.termination, w_termination),
+        ]
+    )
+
+    super(CommandLocomotionTask, self).__init__(
+        name="command",
+        shape=[3],
+        lower_bound=[self._lin_vel_x_range[0], self._lin_vel_y_range[0], self._ang_vel_yaw_range[0]],
+        upper_bound=[self._lin_vel_x_range[1], self._lin_vel_y_range[1], self._ang_vel_yaw_range[1]],
+    )
+
+  def __call__(self, env):
+    return self.reward(env)
+
+  def reset(self, env):
+    self._env = env
+    self._step_count = 0
+    self._use_external_command = False
+
+    self._foot_link_ids = state_utils.get_foot_link_ids(env)
+    self._foot_air_time = np.zeros(len(self._foot_link_ids), dtype=np.float64)
+    self._prev_foot_contacts = np.zeros(len(self._foot_link_ids), dtype=bool)
+
+    dt = self._get_dt(env)
+    foot_pos, _, foot_contacts, _ = state_utils.get_foot_states(
+        env,
+        self._foot_link_ids,
+        previous_positions=None,
+        dt=dt,
+    )
+    self._prev_foot_positions = foot_pos
+    self._prev_foot_contacts = foot_contacts
+
+    self._last_motor_velocities = np.asarray(env.robot.motor_velocities, dtype=np.float64)
+    self._default_pose = self._extract_default_pose(env)
+    self._stand_still_term.kwargs["default_pose"] = self._default_pose
+
+    self._action_history_sensor = None
+    if hasattr(env, "sensor_by_name"):
+      try:
+        self._action_history_sensor = env.sensor_by_name("LastAction")
+      except Exception:
+        self._action_history_sensor = None
+
+    action, last_action, last_last_action = self._read_action_triplet()
+    self._last_action = np.asarray(last_action, dtype=np.float64)
+    self._last_last_action = np.asarray(last_last_action, dtype=np.float64)
+    if action.shape[0] != self._last_action.shape[0]:
+      self._last_action = np.asarray(action, dtype=np.float64)
+      self._last_last_action = np.asarray(action, dtype=np.float64)
+
+    self._sample_command()
+    self._last_reward_terms = {}
+
+  def update(self, env):
+    del env
+
+  def reward(self, env):
+    del env
+    dt = self._get_dt(self._env)
+
+    base_pos, base_quat, base_rpy, base_lin_vel_world, base_ang_vel_world = state_utils.get_base_kinematics(self._env)
+    base_lin_vel_yaw = state_utils.world_to_yaw_frame(base_lin_vel_world, base_rpy[2])
+
+    motor_angles = np.asarray(self._env.robot.motor_angles, dtype=np.float64)
+    motor_velocities = np.asarray(self._env.robot.motor_velocities, dtype=np.float64)
+    try:
+      motor_torques = np.asarray(self._env.robot.motor_torques, dtype=np.float64)
+    except Exception:
+      motor_torques = np.zeros_like(motor_velocities)
+
+    foot_positions, foot_velocities, foot_contacts, contact_forces = state_utils.get_foot_states(
+        self._env,
+        self._foot_link_ids,
+        previous_positions=self._prev_foot_positions,
+        dt=dt,
+    )
+    foot_first_contacts = np.logical_and(foot_contacts, np.logical_not(self._prev_foot_contacts))
+    undesired_contact_count = state_utils.count_undesired_contacts(self._env, self._foot_link_ids)
+
+    action, last_action, last_last_action = self._read_action_triplet()
+    terminated = bool(self.done(self._env))
+
+    state = state_utils.RewardState(
+        command=np.copy(self._command),
+        dt=dt,
+        base_position=base_pos,
+        base_orientation_rpy=base_rpy,
+        base_orientation_quat=base_quat,
+        base_lin_vel_world=base_lin_vel_world,
+        base_ang_vel_world=base_ang_vel_world,
+        base_lin_vel_yaw_frame=base_lin_vel_yaw,
+        motor_angles=motor_angles,
+        motor_velocities=motor_velocities,
+        last_motor_velocities=np.copy(self._last_motor_velocities),
+        motor_torques=motor_torques,
+        action=np.asarray(action, dtype=np.float64),
+        last_action=np.asarray(last_action, dtype=np.float64),
+        last_last_action=np.asarray(last_last_action, dtype=np.float64),
+        foot_positions_world=foot_positions,
+        foot_velocities_world=foot_velocities,
+        foot_contacts=foot_contacts,
+        foot_first_contacts=foot_first_contacts,
+        foot_air_time=np.copy(self._foot_air_time),
+        contact_forces=contact_forces,
+        undesired_contact_count=undesired_contact_count,
+        terminated=terminated,
+    )
+
+    reward, breakdown = self._reward_manager.compute(state)
+    self._last_reward_terms = breakdown
+
+    # Update histories after reward calculation.
+    self._foot_air_time = np.where(foot_contacts, 0.0, self._foot_air_time + dt)
+    self._prev_foot_contacts = foot_contacts
+    self._prev_foot_positions = foot_positions
+    self._last_motor_velocities = motor_velocities
+    self._last_last_action = np.asarray(last_action, dtype=np.float64)
+    self._last_action = np.asarray(action, dtype=np.float64)
+
+    self._step_count += 1
+    self._maybe_resample_command()
+
+    return float(reward)
+
+  def done(self, env):
+    position = state_utils.get_base_kinematics(env)[0]
+    if self._min_com_height is not None and position[2] < float(self._min_com_height):
+      return True
+    return bool(self._terminal_condition(env))
+
+  def get_observation_datatype(self):
+    return [("command_x", np.float64), ("command_y", np.float64), ("command_yaw", np.float64)]
+
+  def get_observation(self):
+    return np.asarray(self._command, dtype=np.float64)
+
+  @property
+  def sensors(self) -> List[sensor.BoxSpaceSensor]:
+    return [self]
+
+  @property
+  def step_count(self):
+    return self._step_count
+
+  @property
+  def last_reward_terms(self):
+    return dict(self._last_reward_terms)
+
+  def set_command(self, command: Sequence[float]):
+    """Overrides random command sampling (for high-level navigation integration)."""
+    command = np.asarray(command, dtype=np.float64)
+    if command.shape != (3,):
+      raise ValueError("Command must have shape (3,), i.e. [vx, vy, yaw_rate].")
+    self._command = command
+    self._use_external_command = True
+
+  def clear_command_override(self):
+    self._use_external_command = False
+    self._sample_command()
+
+  def _read_action_triplet(self):
+    if self._action_history_sensor is not None:
+      try:
+        past_actions = np.asarray(self._action_history_sensor.get_observation(), dtype=np.float64).T
+        if past_actions.ndim == 2 and past_actions.shape[0] >= 3:
+          return past_actions[0], past_actions[1], past_actions[2]
+      except Exception:
+        pass
+
+    fallback_action = None
+    for attr_name in ("_last_action", "last_action", "action"):
+      if hasattr(self._env, attr_name):
+        try:
+          value = np.asarray(getattr(self._env, attr_name), dtype=np.float64)
+          if value.ndim == 1 and value.size > 0:
+            fallback_action = value
+            break
+        except Exception:
+          pass
+
+    if fallback_action is None:
+      fallback_action = np.copy(self._last_action)
+
+    return fallback_action, np.copy(self._last_action), np.copy(self._last_last_action)
+
+  def _sample_command(self):
+    if self._rng.random() < self._zero_command_probability:
+      self._command = np.zeros(3, dtype=np.float64)
+      return
+
+    vx = self._rng.uniform(self._lin_vel_x_range[0], self._lin_vel_x_range[1])
+    vy = self._rng.uniform(self._lin_vel_y_range[0], self._lin_vel_y_range[1])
+    wz = self._rng.uniform(self._ang_vel_yaw_range[0], self._ang_vel_yaw_range[1])
+    self._command = np.asarray([vx, vy, wz], dtype=np.float64)
+
+  def _maybe_resample_command(self):
+    if self._use_external_command:
+      return
+    if self._resample_velocity_step <= 0:
+      return
+    if self._step_count % self._resample_velocity_step == 0:
+      self._sample_command()
+
+  def _extract_default_pose(self, env):
+    constants = None
+    robot = env.robot
+    if hasattr(robot, "get_constants"):
+      try:
+        constants = robot.get_constants()
+      except Exception:
+        constants = None
+    elif hasattr(robot, "constants"):
+      try:
+        constants = robot.constants()
+      except Exception:
+        constants = None
+
+    if constants is not None and hasattr(constants, "INIT_JOINT_ANGLES"):
+      init = constants.INIT_JOINT_ANGLES
+      if isinstance(init, dict):
+        return np.asarray(list(init.values()), dtype=np.float64)
+      return np.asarray(init, dtype=np.float64)
+    return np.zeros_like(np.asarray(env.robot.motor_angles, dtype=np.float64))
+
+  def _get_dt(self, env) -> float:
+    dt = float(getattr(env, "env_time_step", 0.0))
+    if dt <= 0.0:
+      sim_dt = float(getattr(env, "sim_time_step", 0.0))
+      action_repeat = float(getattr(env, "num_action_repeat", 1.0))
+      dt = sim_dt * action_repeat
+    if dt <= 0.0:
+      dt = 0.01
+    return dt
+

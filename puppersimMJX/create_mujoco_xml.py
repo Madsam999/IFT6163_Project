@@ -1,0 +1,358 @@
+"""Create stable MJX XML from fixed URDF-converted XML.
+
+This script is intentionally deterministic for the Pupper v2 workflow:
+  input  : `puppersim/data/pupper_v2a.fixed.xml`
+  output : `puppersim/data/pupper_v2_final_stable.xml`
+
+Safety:
+- It will NOT overwrite an existing output unless `--force` is provided.
+"""
+
+from __future__ import annotations
+
+import argparse
+import pathlib
+import xml.etree.ElementTree as ET
+
+
+MOTOR_JOINT_ORDER = [
+    "rightFrontLegMotor",
+    "rightFrontUpperLegMotor",
+    "rightFrontLowerLegMotor",
+    "leftFrontLegMotor",
+    "leftFrontUpperLegMotor",
+    "leftFrontLowerLegMotor",
+    "rightRearLegMotor",
+    "rightRearUpperLegMotor",
+    "rightRearLowerLegMotor",
+    "leftRearLegMotor",
+    "leftRearUpperLegMotor",
+    "leftRearLowerLegMotor",
+]
+
+LOWER_LEGS = [
+    "leftFrontLowerLeg",
+    "leftRearLowerLeg",
+    "rightFrontLowerLeg",
+    "rightRearLowerLeg",
+]
+
+
+def _ensure_asset_stable(asset: ET.Element) -> None:
+    has_grid_texture = any(e.tag == "texture" and e.get("name") == "grid" for e in asset)
+    has_grid_material = any(e.tag == "material" and e.get("name") == "grid" for e in asset)
+    if not has_grid_texture:
+        ET.SubElement(
+            asset,
+            "texture",
+            name="grid",
+            type="2d",
+            builtin="checker",
+            width="512",
+            height="512",
+            rgb1=".2 .4 .6",
+            rgb2=".4 .6 .8",
+        )
+    if not has_grid_material:
+        ET.SubElement(
+            asset,
+            "material",
+            name="grid",
+            texture="grid",
+            texrepeat="1 1",
+            texuniform="true",
+            reflectance="0",
+        )
+
+
+def _remove_children(root: ET.Element, tags: tuple[str, ...]) -> None:
+    for child in list(root):
+        if child.tag in tags:
+            root.remove(child)
+
+
+def _set_collision_and_visual_rules(base: ET.Element) -> None:
+    for geom in base.findall(".//geom"):
+        geom_type = geom.get("type")
+        if geom_type == "mesh":
+            geom.set("contype", "0")
+            geom.set("conaffinity", "0")
+            continue
+
+        # Convert cylinders to spheres (MJX compatibility).
+        if geom_type == "cylinder":
+            size = geom.get("size", "").split()
+            if size:
+                geom.set("size", size[0])
+            geom.set("type", "sphere")
+            geom.set("class", "collision")
+            geom.set("contype", "2")
+            geom.set("conaffinity", "1")
+            geom.set("condim", "3")
+            geom.set("group", "1")
+            continue
+
+        if geom_type == "box":
+            if geom.get("name") == "base_collision":
+                geom.set("class", "collision")
+                geom.set("contype", "1")
+                geom.set("conaffinity", "1")
+                geom.set("condim", "3")
+                geom.set("group", "3")
+                continue
+            # Lower leg boxes are purely visual in stable model.
+            geom.set("contype", "0")
+            geom.set("conaffinity", "0")
+            continue
+
+        # Toe spheres in lower legs are collision geoms.
+        if geom_type in (None, "sphere"):
+            geom.set("type", "sphere")
+            parent = None
+            for candidate in base.findall(".//body"):
+                if geom in list(candidate):
+                    parent = candidate
+                    break
+            if parent is not None and parent.get("name") in LOWER_LEGS:
+                geom.set("class", "collision")
+                geom.set("contype", "1")
+                geom.set("conaffinity", "1")
+                geom.set("condim", "3")
+                geom.set("group", "1")
+
+
+def _add_foot_sites(base: ET.Element) -> None:
+    for lower_leg_name in LOWER_LEGS:
+        lower_leg = base.find(f".//body[@name='{lower_leg_name}']")
+        if lower_leg is None:
+            continue
+        site_name = f"{lower_leg_name}_foot_site"
+        if lower_leg.find(f"./site[@name='{site_name}']") is not None:
+            continue
+        geoms = lower_leg.findall("./geom")
+        if not geoms:
+            continue
+        toe_geom = geoms[-1]
+        toe_pos = toe_geom.get("pos", "0 0 0")
+        ET.SubElement(lower_leg, "site", name=site_name, pos=toe_pos)
+
+
+def _append_stable_world_objects(worldbody: ET.Element) -> None:
+    ET.SubElement(
+        worldbody,
+        "geom",
+        name="floor",
+        size="0 0 .05",
+        type="plane",
+        material="grid",
+        condim="3",
+        contype="1",
+        conaffinity="1",
+    )
+    ET.SubElement(
+        worldbody,
+        "geom",
+        name="floor_visual",
+        size="0 0 .05",
+        pos="0 0 -0.001",
+        type="plane",
+        material="grid",
+        condim="3",
+        contype="0",
+        conaffinity="0",
+        group="1",
+    )
+    ET.SubElement(
+        worldbody,
+        "light",
+        name="spotlight",
+        mode="targetbodycom",
+        target="base_link",
+        diffuse="1.0 1.0 1.0",
+        specular="0.35 0.35 0.35",
+        ambient="0.20 0.20 0.20",
+        pos="0 -4 4",
+        cutoff="100",
+        castshadow="false",
+    )
+    ET.SubElement(
+        worldbody,
+        "light",
+        name="back_fill",
+        mode="targetbodycom",
+        target="base_link",
+        diffuse="0.55 0.55 0.55",
+        specular="0.12 0.12 0.12",
+        ambient="0.10 0.10 0.10",
+        pos="0 3.5 2.5",
+        cutoff="100",
+        castshadow="false",
+    )
+    ET.SubElement(
+        worldbody,
+        "camera",
+        name="tracking_cam",
+        mode="targetbody",
+        target="base_link",
+        pos="0.5 -0.5 0.5",
+    )
+
+
+def _append_stable_defaults(root: ET.Element) -> None:
+    default = ET.SubElement(root, "default")
+    ET.SubElement(default, "geom", condim="3", contype="0", conaffinity="0", group="1")
+    ET.SubElement(
+        default,
+        "joint",
+        armature="0.0016",
+        type="hinge",
+        damping="0.01",
+        frictionloss="0.125",
+        limited="true",
+    )
+    ET.SubElement(
+        default,
+        "general",
+        forcerange="-3 3",
+        forcelimited="true",
+        biastype="affine",
+        gainprm="5.0 0 0",
+        biasprm="0 -5.0 -0.1",
+    )
+    collision_default = ET.SubElement(default, "default", **{"class": "collision"})
+    ET.SubElement(
+        collision_default,
+        "geom",
+        group="3",
+        contype="1",
+        conaffinity="1",
+        condim="3",
+        solimp="0.015 1 0.031",
+        friction="0.8 0.02 0.01",
+    )
+
+
+def _append_stable_actuators(root: ET.Element) -> None:
+    actuator = ET.SubElement(root, "actuator")
+    for joint_name in MOTOR_JOINT_ORDER:
+        ET.SubElement(actuator, "general", joint=joint_name, name=joint_name)
+
+
+def _append_stable_option_custom(root: ET.Element) -> None:
+    option = ET.SubElement(
+        root,
+        "option",
+        cone="pyramidal",
+        impratio="10",
+        iterations="2",
+        ls_iterations="5",
+        timestep="0.004",
+    )
+    ET.SubElement(option, "flag", eulerdamp="disable")
+    custom = ET.SubElement(root, "custom")
+    ET.SubElement(custom, "numeric", name="max_contact_points", data="5")
+    ET.SubElement(custom, "numeric", name="max_geom_pairs", data="4")
+
+
+def compose_stable_xml(input_path: pathlib.Path, output_path: pathlib.Path, spawn_z: float, force: bool) -> None:
+    tree = ET.parse(input_path)
+    root = tree.getroot()
+
+    compiler = root.find("compiler")
+    if compiler is None:
+        compiler = ET.SubElement(root, "compiler")
+    compiler.set("autolimits", "true")
+
+    asset = root.find("asset")
+    if asset is None:
+        asset = ET.SubElement(root, "asset")
+    _ensure_asset_stable(asset)
+
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        raise ValueError("Input xml has no <worldbody>.")
+    base = worldbody.find("./body")
+    if base is None:
+        raise ValueError("Input xml has no base body in <worldbody>.")
+
+    # Base body normalization.
+    base.set("name", "base_link")
+    base.set("pos", f"0 0 {spawn_z:.2f}")
+    for child in list(base):
+        if child.tag == "joint" and child.get("type") == "free":
+            base.remove(child)
+
+    if base.find("./freejoint[@name='base_link_freejoint']") is None:
+        ET.SubElement(base, "freejoint", name="base_link_freejoint")
+    if base.find("./site[@name='body_imu_site']") is None:
+        ET.SubElement(base, "site", name="body_imu_site", pos="0.09 0 0.032")
+    if base.find("./geom[@name='base_collision']") is None:
+        ET.SubElement(
+            base,
+            "geom",
+            name="base_collision",
+            type="box",
+            size="0.070 0.055 0.025",
+            pos="0 0.100 0.010",
+            **{"class": "collision"},
+            contype="1",
+            conaffinity="1",
+            condim="3",
+            group="3",
+            rgba="0 0 0 0",
+        )
+
+    _set_collision_and_visual_rules(base)
+    _add_foot_sites(base)
+
+    # Remove old stable sections if present and rebuild deterministically.
+    _remove_children(worldbody, ("geom", "light", "camera"))
+    _append_stable_world_objects(worldbody)
+
+    _remove_children(root, ("default", "actuator", "option", "custom"))
+    _append_stable_defaults(root)
+    _append_stable_actuators(root)
+    _append_stable_option_custom(root)
+
+    ET.indent(tree, space="  ")
+
+    if output_path.exists() and not force:
+        raise FileExistsError(
+            f"Refusing to overwrite existing file: {output_path}. Use --force to overwrite."
+        )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tree.write(output_path, encoding="utf-8", xml_declaration=True, short_empty_elements=True)
+    print(f"Wrote stable xml: {output_path}")
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--input",
+        type=pathlib.Path,
+        default=pathlib.Path("puppersim/data/pupper_v2a.fixed.xml"),
+        help="Input fixed xml generated from URDF.",
+    )
+    parser.add_argument(
+        "--output",
+        type=pathlib.Path,
+        default=pathlib.Path("puppersim/data/pupper_v2_final_stable.xml"),
+        help="Output stable xml path.",
+    )
+    parser.add_argument("--spawn-z", type=float, default=0.20, help="Base spawn height in meters.")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow overwriting existing output file.",
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    compose_stable_xml(
+        input_path=args.input,
+        output_path=args.output,
+        spawn_z=float(args.spawn_z),
+        force=bool(args.force),
+    )

@@ -1,0 +1,124 @@
+import puppersim.joint_offset_wrapper
+
+import pybullet_envs.minitaur.envs_v2.env_wrappers.pmtg_wrapper_env
+import pybullet_envs.minitaur.envs_v2.env_wrappers.observation_dictionary_to_array_wrapper
+import pybullet_envs.minitaur.envs_v2.locomotion_gym_config
+import pybullet_envs.minitaur.envs_v2.locomotion_gym_env
+import pybullet_envs.minitaur.envs_v2.scenes.scene_base
+import pybullet_envs.minitaur.envs_v2.scenes.simple_scene
+import pybullet_envs.minitaur.envs_v2.sensors.imu_sensor
+import pybullet_envs.minitaur.envs_v2.sensors.motor_angle_sensor
+import pybullet_envs.minitaur.robots.robot_urdf_loader
+
+import puppersim.pupper_motor_model
+import puppersim.pupper_constants
+import puppersim.pupper_terminal_conditions
+import puppersim.pupper_v2
+import pybullet_envs.minitaur.robots.robot_config
+
+import puppersim.pupper_tasks.locomotion_task.command_locomotion_task
+
+
+UPPER_BOUND = 6.28318548203
+LOWER_BOUND = -6.28318548203
+SIM_TIME_STEP = 0.001
+NUM_ACTION_REPEAT = 10
+EPISODE_LENGTH = 1000
+
+imu_sensor.IMUSensor.channels = [
+    %imu_sensor.IMUChannel.ROLL,
+    %imu_sensor.IMUChannel.PITCH,
+    %imu_sensor.IMUChannel.ROLL_RATE,
+    %imu_sensor.IMUChannel.PITCH_RATE,
+]
+
+imu_sensor.IMUSensor.lower_bound = [-6.28318548203, -6.28318548203,
+                                       -62.8318554688, -62.8318554688]
+imu_sensor.IMUSensor.upper_bound = [6.28318548203, 6.28318548203,
+                                       62.8318554688, 62.8318554688]
+
+# We use the default configuration for MotorAngleSensor, which reads limits from the robot.
+SENSORS = [@motor_angle_sensor.MotorAngleSensor(), @imu_sensor.IMUSensor()]
+locomotion_gym_config.SimulationParameters.sim_time_step_s = %SIM_TIME_STEP
+locomotion_gym_config.SimulationParameters.num_action_repeat = %NUM_ACTION_REPEAT
+locomotion_gym_config.SimulationParameters.enable_rendering = False
+locomotion_gym_config.LocomotionGymConfig.simulation_parameters = @locomotion_gym_config.SimulationParameters()
+locomotion_gym_env.LocomotionGymEnv.gym_config = @locomotion_gym_config.LocomotionGymConfig()
+
+locomotion_gym_env.LocomotionGymEnv.scene = @simple_scene.SimpleScene()
+
+# Specify the motor limits and motor control mode.
+robot_config.MotorLimits.angle_lower_limits = %pupper_constants.MOTOR_ACTION_LOWER_LIMIT
+robot_config.MotorLimits.angle_upper_limits = %pupper_constants.MOTOR_ACTION_UPPER_LIMIT
+robot_config.MotorLimits.torque_lower_limits = -1.7 # [Nm]
+robot_config.MotorLimits.torque_upper_limits = 1.7 # [Nm]
+
+pupper_v2.Pupper.motor_limits = @robot_config.MotorLimits()
+pupper_v2.Pupper.motor_control_mode = %robot_config.MotorControlMode.POSITION
+pupper_v2.Pupper.motor_model_class = @pupper_motor_model.PupperMotorModel
+locomotion_gym_env.LocomotionGymEnv.robot_class = @pupper_v2.Pupper
+
+# Command-conditioned locomotion task.
+command_locomotion_task.CommandLocomotionTask.terminal_condition = @pupper_terminal_conditions.default_terminal_condition_for_pupper
+command_locomotion_task.CommandLocomotionTask.episode_length = %EPISODE_LENGTH
+
+# Command sampling.
+# `resample_velocity_step` is intentionally left unset so it defaults to
+# `episode_length // 2` inside the task.
+command_locomotion_task.CommandLocomotionTask.lin_vel_x_range = [-0.75, 0.75]
+command_locomotion_task.CommandLocomotionTask.lin_vel_y_range = [-0.5, 0.5]
+command_locomotion_task.CommandLocomotionTask.ang_vel_yaw_range = [-2.0, 2.0]
+command_locomotion_task.CommandLocomotionTask.zero_command_probability = 0.02
+command_locomotion_task.CommandLocomotionTask.stand_still_command_threshold = 0.05
+
+# Reward shaping (balanced default preset).
+command_locomotion_task.CommandLocomotionTask.tracking_sigma_lin = 0.25
+command_locomotion_task.CommandLocomotionTask.tracking_sigma_ang = 0.25
+command_locomotion_task.CommandLocomotionTask.feet_air_time_minimum = 0.10
+
+command_locomotion_task.CommandLocomotionTask.w_track_lin_vel_xy = 1.5
+command_locomotion_task.CommandLocomotionTask.w_track_ang_vel_z = 0.8
+command_locomotion_task.CommandLocomotionTask.w_feet_air_time = 0.2
+
+command_locomotion_task.CommandLocomotionTask.w_lin_vel_z = -0.5
+command_locomotion_task.CommandLocomotionTask.w_ang_vel_xy = -0.05
+command_locomotion_task.CommandLocomotionTask.w_orientation = -1.2
+
+command_locomotion_task.CommandLocomotionTask.w_torques = -0.0002
+command_locomotion_task.CommandLocomotionTask.w_mechanical_work = -0.0005
+command_locomotion_task.CommandLocomotionTask.w_joint_acceleration = -0.000001
+command_locomotion_task.CommandLocomotionTask.w_action_rate = -0.01
+
+command_locomotion_task.CommandLocomotionTask.w_foot_slip = -0.1
+command_locomotion_task.CommandLocomotionTask.w_abduction_angle = -0.1
+command_locomotion_task.CommandLocomotionTask.w_stand_still = -0.1
+
+command_locomotion_task.CommandLocomotionTask.w_collision = -0.2
+command_locomotion_task.CommandLocomotionTask.w_termination = -5.0
+
+locomotion_gym_env.LocomotionGymEnv.task = @command_locomotion_task.CommandLocomotionTask()
+
+# Motor model parameters.
+pupper_motor_model.PupperMotorModel.kp = 4.0 # [Nm/rad]
+pupper_motor_model.PupperMotorModel.kd = 0.4 # [Nm/(rad/s)]
+pupper_motor_model.PupperMotorModel.sampling_time = %SIM_TIME_STEP
+pupper_motor_model.PupperMotorModel.velocity_filter_time_constant = 0.01 # [s]
+pupper_motor_model.PupperMotorModel.motor_damping = 0.0045 # [Nm/(rad/s)]
+pupper_motor_model.PupperMotorModel.motor_torque_dependent_friction = 0.28 # [unitless]
+
+pupper_v2.Pupper.sensors = %SENSORS
+
+pmtg_wrapper_env.PmtgWrapperEnv.action_filter_enable = True
+pmtg_wrapper_env.PmtgWrapperEnv.intensity_upper_bound = 1.0
+pmtg_wrapper_env.PmtgWrapperEnv.max_delta_time = 2.0
+pmtg_wrapper_env.PmtgWrapperEnv.min_delta_time = 0.5
+pmtg_wrapper_env.PmtgWrapperEnv.residual_range = 0.5
+pmtg_wrapper_env.PmtgWrapperEnv.integrator_coupling_mode = "all coupled"
+pmtg_wrapper_env.PmtgWrapperEnv.walk_height_coupling_mode = "all coupled"
+pmtg_wrapper_env.PmtgWrapperEnv.variable_swing_stance_ratio = 1
+pmtg_wrapper_env.PmtgWrapperEnv.init_gait = "trot"
+
+env_loader.load.wrapper_classes = [
+    @joint_offset_wrapper.JointOffsetWrapperEnv,
+    @pmtg_wrapper_env.PmtgWrapperEnv,
+    @observation_dictionary_to_array_wrapper.ObservationDictionaryToArrayWrapper]
