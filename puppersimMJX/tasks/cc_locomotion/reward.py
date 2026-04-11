@@ -1,0 +1,242 @@
+"""Command-conditioned locomotion rewards for Pupper Brax/MJX."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Tuple
+
+import jax
+from jax import numpy as jp
+from brax import math
+
+EPS = 1e-6
+
+
+@dataclass(frozen=True)
+class CommandRewardScales:
+    tracking_lin_vel: float = 1.5
+    tracking_ang_vel: float = 0.8
+    lin_vel_z: float = -2.0
+    ang_vel_xy: float = -0.05
+    orientation: float = -5.0
+    tracking_orientation: float = 1.0
+    torques: float = -0.0002
+    joint_acceleration: float = -1e-6
+    mechanical_work: float = 0.0
+    action_rate: float = -0.01
+    feet_air_time: float = 0.2
+    stand_still: float = -0.5
+    stand_still_joint_velocity: float = -0.1
+    abduction_angle: float = -0.1
+    termination: float = -100.0
+    foot_slip: float = -0.1
+    knee_collision: float = -1.0
+    body_collision: float = -1.0
+
+
+@dataclass(frozen=True)
+class CommandRewardConfig:
+    tracking_sigma: float = 0.25
+    feet_air_time_minimum: float = 0.10
+    stand_still_command_threshold: float = 0.05
+    desired_world_z_in_body_frame: Tuple[float, float, float] = (0.0, 0.0, 1.0)
+    default_pose: Tuple[float, ...] = (
+        0.0,
+        0.6,
+        -1.2,
+        0.0,
+        0.6,
+        -1.2,
+        0.0,
+        0.6,
+        -1.2,
+        0.0,
+        0.6,
+        -1.2,
+    )
+    desired_abduction_angles: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    abduction_joint_indices: Tuple[int, int, int, int] = (0, 3, 6, 9)
+    scales: CommandRewardScales = CommandRewardScales()
+
+
+def _tracking_lin_vel(command: jax.Array, base_rot, base_vel_world, tracking_sigma: float):
+    local_vel = math.rotate(base_vel_world, math.quat_inv(base_rot))
+    err = jp.sum(jp.square(command[:2] - local_vel[:2]))
+    return jp.exp(-err / (tracking_sigma + EPS))
+
+
+def _tracking_ang_vel(command: jax.Array, base_rot, base_ang_world, tracking_sigma: float):
+    local_ang = math.rotate(base_ang_world, math.quat_inv(base_rot))
+    err = jp.square(command[2] - local_ang[2])
+    return jp.exp(-err / (tracking_sigma + EPS))
+
+
+def _tracking_orientation(desired_world_z_in_body_frame, base_rot, tracking_sigma: float):
+    world_z = jp.array([0.0, 0.0, 1.0], dtype=base_rot.dtype)
+    world_z_in_body_frame = math.rotate(world_z, math.quat_inv(base_rot))
+    err = jp.sum(jp.square(world_z_in_body_frame - desired_world_z_in_body_frame))
+    return jp.exp(-err / (tracking_sigma + EPS))
+
+
+def _orientation_penalty(base_rot):
+    up = jp.array([0.0, 0.0, 1.0], dtype=base_rot.dtype)
+    rot_up = math.rotate(up, base_rot)
+    return jp.sum(jp.square(rot_up[:2]))
+
+
+def _stand_still_penalty(command, joint_angles, default_pose, command_threshold: float):
+    cmd_norm = jp.linalg.norm(command[:3])
+    return jp.sum(jp.abs(joint_angles - default_pose)) * (cmd_norm < command_threshold)
+
+
+def _stand_still_joint_velocity_penalty(command, joint_vel, command_threshold: float):
+    cmd_norm = jp.linalg.norm(command[:3])
+    return jp.sum(jp.abs(joint_vel)) * (cmd_norm < command_threshold)
+
+
+def _abduction_penalty(joint_angles, abduction_joint_indices, desired_abduction_angles):
+    idx = jp.array(abduction_joint_indices, dtype=jp.int32)
+    abduction = joint_angles[idx]
+    return jp.sum(jp.square(abduction - desired_abduction_angles))
+
+
+def _feet_air_time_reward(air_time, first_contact, command, minimum_airtime: float):
+    rew = jp.sum((air_time - minimum_airtime) * first_contact)
+    cmd_norm = jp.linalg.norm(command[:3])
+    return rew * (cmd_norm > 0.05)
+
+
+def compute_command_reward(
+    *,
+    command: jax.Array,
+    base_rot: jax.Array,
+    base_vel_world: jax.Array,
+    base_ang_world: jax.Array,
+    joint_angles: jax.Array,
+    joint_vel: jax.Array,
+    last_joint_vel: jax.Array,
+    torques: jax.Array,
+    action: jax.Array,
+    last_action: jax.Array,
+    dt: float,
+    air_time: jax.Array,
+    first_contact: jax.Array,
+    foot_slip: jax.Array,
+    knee_collision_count: jax.Array,
+    body_collision_count: jax.Array,
+    done: jax.Array,
+    step: jax.Array,
+    config: CommandRewardConfig,
+) -> Tuple[jax.Array, Dict[str, jax.Array]]:
+    s = config.scales
+    desired_world_z = jp.array(config.desired_world_z_in_body_frame, dtype=base_rot.dtype)
+    default_pose = jp.array(config.default_pose, dtype=joint_angles.dtype)
+    desired_abduction = jp.array(config.desired_abduction_angles, dtype=joint_angles.dtype)
+
+    t_tracking_lin = _tracking_lin_vel(command, base_rot, base_vel_world, config.tracking_sigma)
+    t_tracking_ang = _tracking_ang_vel(command, base_rot, base_ang_world, config.tracking_sigma)
+    t_lin_vel_z = jp.square(base_vel_world[2])
+    t_ang_vel_xy = jp.sum(jp.square(base_ang_world[:2]))
+    t_orientation = _orientation_penalty(base_rot)
+    t_tracking_orientation = _tracking_orientation(desired_world_z, base_rot, config.tracking_sigma)
+    t_torques = jp.sum(jp.square(torques))
+    t_joint_acc = jp.sum(jp.square((joint_vel - last_joint_vel) / (dt + EPS)))
+    t_mech = jp.sum(jp.abs(torques * joint_vel))
+    t_action_rate = jp.sum(jp.square(action - last_action))
+    t_feet_air = _feet_air_time_reward(air_time, first_contact, command, config.feet_air_time_minimum)
+    t_stand = _stand_still_penalty(
+        command, joint_angles, default_pose, config.stand_still_command_threshold
+    )
+    t_stand_qd = _stand_still_joint_velocity_penalty(
+        command, joint_vel, config.stand_still_command_threshold
+    )
+    t_abduction = _abduction_penalty(
+        joint_angles, config.abduction_joint_indices, desired_abduction
+    )
+    del step  # kept in function signature for backward compatibility
+    t_termination = done
+
+    reward = (
+        s.tracking_lin_vel * t_tracking_lin
+        + s.tracking_ang_vel * t_tracking_ang
+        + s.lin_vel_z * t_lin_vel_z
+        + s.ang_vel_xy * t_ang_vel_xy
+        + s.orientation * t_orientation
+        + s.tracking_orientation * t_tracking_orientation
+        + s.torques * t_torques
+        + s.joint_acceleration * t_joint_acc
+        + s.mechanical_work * t_mech
+        + s.action_rate * t_action_rate
+        + s.feet_air_time * t_feet_air
+        + s.stand_still * t_stand
+        + s.stand_still_joint_velocity * t_stand_qd
+        + s.abduction_angle * t_abduction
+        + s.termination * t_termination
+        + s.foot_slip * foot_slip
+        + s.knee_collision * knee_collision_count
+        + s.body_collision * body_collision_count
+    )
+
+    terms = {
+        "tracking_lin_vel": t_tracking_lin,
+        "tracking_ang_vel": t_tracking_ang,
+        "lin_vel_z": t_lin_vel_z,
+        "ang_vel_xy": t_ang_vel_xy,
+        "orientation": t_orientation,
+        "tracking_orientation": t_tracking_orientation,
+        "torques": t_torques,
+        "joint_acceleration": t_joint_acc,
+        "mechanical_work": t_mech,
+        "action_rate": t_action_rate,
+        "feet_air_time": t_feet_air,
+        "stand_still": t_stand,
+        "stand_still_joint_velocity": t_stand_qd,
+        "abduction_angle": t_abduction,
+        "termination": t_termination,
+        "foot_slip": foot_slip,
+        "knee_collision": knee_collision_count,
+        "body_collision": body_collision_count,
+        "task_reward": reward,
+    }
+    return reward, terms
+
+
+def _build_config(config: Dict[str, Any]) -> CommandRewardConfig:
+    cfg = dict(config)
+    # Legacy field no longer used.
+    cfg.pop("early_termination_step_threshold", None)
+    scales = cfg.get("scales")
+    if isinstance(scales, dict):
+        cfg["scales"] = CommandRewardScales(**scales)
+    return CommandRewardConfig(**cfg)
+
+
+def build_reward(config: Dict[str, Any] | None = None) -> Callable[[Dict[str, Any]], Tuple[jax.Array, Dict[str, jax.Array]]]:
+    """Builds a reward callable from a JSON-like config dict."""
+
+    cfg = _build_config(dict(config or {}))
+
+    def reward_fn(ctx: Dict[str, Any]) -> Tuple[jax.Array, Dict[str, jax.Array]]:
+        return compute_command_reward(
+            command=ctx["command"],
+            base_rot=ctx["torso_quat"],
+            base_vel_world=ctx["base_vel_world"],
+            base_ang_world=ctx["base_ang_world"],
+            joint_angles=ctx["joint_angles"],
+            joint_vel=ctx["joint_vel"],
+            last_joint_vel=ctx["last_joint_vel"],
+            torques=ctx["torques"],
+            action=ctx["action"],
+            last_action=ctx["last_action"],
+            dt=ctx["dt"],
+            air_time=ctx["air_time"],
+            first_contact=ctx["first_contact"],
+            foot_slip=ctx["foot_slip"],
+            knee_collision_count=ctx["knee_collision"],
+            body_collision_count=ctx["body_collision"],
+            done=ctx["raw_done"],
+            step=ctx["episode_step"],
+            config=cfg,
+        )
+
+    return reward_fn

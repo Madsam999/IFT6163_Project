@@ -1,0 +1,8 @@
+{
+  "name": "command_locomotion",
+  "description": "Command-conditioned locomotion profile with domain randomization defaults.",
+  "env_kwargs": "puppersimMJX/tasks/cc_locomotion/config/pupper_brax_env_kwargs.command_locomotion.json",
+  "randomization_module": "puppersimMJX.pupper_brax_domain_randomization",
+  "randomization_fn": "domain_randomize",
+  "randomization_kwargs": "puppersimMJX/tasks/cc_locomotion/config/pupper_brax_randomization_kwargs.v3like.json"
+}

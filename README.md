@@ -71,7 +71,7 @@ Depending on your computer specs, each training iteration will take around 1 - 5
 You can also train Pupper v2 with Brax PPO on MJX backends:
 ```bash
 pip install "jax[cpu]" brax mujoco flax orbax-checkpoint tyro
-python puppersim/pupper_train_ppo_brax.py --env-name pupper_v2 --backend mjx
+python puppersimMJX/pupper_train_ppo_brax.py --env-name pupper_v2 --backend mjx
 ```
 
 Requires Python 3.10+ (MJX is not supported on Python 3.7).
@@ -163,14 +163,14 @@ This is the recommended path for checkpoints like:
 
 1. Export a policy bundle (only needed once per checkpoint):
 ```bash
-python3 puppersim/pupper_brax_export_policy_bundle.py \
+python3 puppersimMJX/pupper_brax_export_policy_bundle.py \
   --params-path puppersim/data/pretrained_cc_locomotion/pupper_train_ppo_brax.params \
   --output-dir puppersim/data/pretrained_cc_locomotion
 ```
 
 2. Deploy and run on robot:
 ```bash
-./deploy_to_robot.sh python3 puppersim/pupper_brax_run_policy_robot.py \
+./deploy_to_robot.sh python3 puppersimMJX/pupper_brax_run_policy_robot.py \
   --checkpoint-dir puppersim/data/pretrained_cc_locomotion \
   --seconds 60 \
   --command-x 0.35 \
@@ -182,7 +182,7 @@ Realtime command options:
 * Fixed command (default): keep `--command-source fixed` (or omit).
 * Keyboard control:
 ```bash
-./deploy_to_robot.sh python3 puppersim/pupper_brax_run_policy_robot.py \
+./deploy_to_robot.sh python3 puppersimMJX/pupper_brax_run_policy_robot.py \
   --checkpoint-dir puppersim/data/pretrained_cc_locomotion \
   --command-source keyboard \
   --keyboard-control-mode hold \
@@ -192,7 +192,7 @@ Controls: `W/S` -> `vx`, `A/D` -> `vy`, `Q/E` -> yaw, `SPACE` -> zero, `X` -> st
 
 * HID joystick control (FrSky/BetaFPV, via `puppersim/JoystickInterface.py`):
 ```bash
-./deploy_to_robot.sh python3 puppersim/pupper_brax_run_policy_robot.py \
+./deploy_to_robot.sh python3 puppersimMJX/pupper_brax_run_policy_robot.py \
   --checkpoint-dir puppersim/data/pretrained_cc_locomotion \
   --command-source joystick \
   --seconds 120
