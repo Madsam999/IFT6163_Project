@@ -9,30 +9,125 @@ from __future__ import annotations
 
 import argparse
 import json
+import pickle
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import numpy as np
 from flax.serialization import from_bytes
 
 
+def _coerce_loaded_params(params: Any) -> Any:
+    """Best-effort normalization of checkpoint payloads to mapping-like trees."""
+    cur = params
+    for _ in range(4):
+        # Most common object-wrapper case.
+        if isinstance(cur, np.ndarray) and cur.dtype == object and cur.size == 1:
+            cur = cur.reshape(()).item()
+            continue
+        if isinstance(cur, np.ndarray) and cur.dtype == object:
+            return [cur.reshape(-1)[i] for i in range(cur.size)]
+
+        # Some checkpoints store serialized bytes as uint8 vectors/scalars.
+        if isinstance(cur, np.ndarray) and cur.dtype in (np.uint8, np.int8):
+            raw = cur.tobytes()
+            try:
+                return from_bytes(None, raw)
+            except Exception:
+                pass
+            try:
+                return pickle.loads(raw)
+            except Exception:
+                return cur
+
+        # Byte-like scalar payload.
+        if isinstance(cur, (bytes, bytearray, memoryview)):
+            raw = bytes(cur)
+            try:
+                return from_bytes(None, raw)
+            except Exception:
+                pass
+            try:
+                return pickle.loads(raw)
+            except Exception:
+                return cur
+
+        break
+    return cur
+
+
 def _load_params(path: Path) -> Any:
-    return from_bytes(None, path.read_bytes())
+    raw = path.read_bytes()
+    # Legacy/default flax serialization path.
+    try:
+        return from_bytes(None, raw)
+    except Exception:
+        pass
+
+    # Newer trainer default saves params as .npz.
+    if path.suffix.lower() == ".npz" or raw[:4] == b"PK\x03\x04":
+        with np.load(path, allow_pickle=True) as ckpt:
+            files = list(ckpt.files)
+            if not files:
+                raise ValueError(f"Empty npz checkpoint: {path}")
+
+            # Common case: single object-pickled `params`.
+            if len(files) == 1 and files[0] == "params":
+                p = ckpt["params"]
+                return _coerce_loaded_params(p)
+
+            # Flat slash-delimited keys -> nested dict.
+            root: Dict[str, Any] = {}
+            for k in files:
+                v = ckpt[k]
+                parts = [s for s in k.split("/") if s]
+                if not parts:
+                    continue
+                node = root
+                for part in parts[:-1]:
+                    child = node.get(part)
+                    if not isinstance(child, dict):
+                        child = {}
+                        node[part] = child
+                    node = child
+                node[parts[-1]] = v
+            return _coerce_loaded_params(root)
+
+    # Optional pickle fallback.
+    try:
+        return _coerce_loaded_params(pickle.loads(raw))
+    except Exception as exc:
+        raise ValueError(f"Unsupported params format for {path}") from exc
 
 
-def _pick_normalizer(tree: Dict[str, Any], key_hint: Optional[str]) -> Dict[str, Any]:
+def _pick_normalizer(tree: Mapping[str, Any], key_hint: Optional[str]) -> Dict[str, Any]:
+    def _as_norm(candidate: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(candidate, Mapping):
+            if "mean" in candidate and "std" in candidate:
+                return dict(candidate)
+            return None
+        if hasattr(candidate, "mean") and hasattr(candidate, "std"):
+            out = {
+                "mean": getattr(candidate, "mean"),
+                "std": getattr(candidate, "std"),
+            }
+            out["std_eps"] = getattr(candidate, "std_eps", np.asarray(1e-6, dtype=np.float32))
+            return out
+        return None
+
     if key_hint and key_hint in tree:
-        candidate = tree[key_hint]
-        if isinstance(candidate, dict) and "mean" in candidate and "std" in candidate:
+        candidate = _as_norm(tree[key_hint])
+        if candidate is not None:
             return candidate
 
     for _, value in tree.items():
-        if isinstance(value, dict) and "mean" in value and "std" in value:
-            return value
+        candidate = _as_norm(value)
+        if candidate is not None:
+            return candidate
     raise ValueError("Could not find normalizer subtree with keys {mean,std}.")
 
 
-def _pick_policy(tree: Dict[str, Any], key_hint: Optional[str]) -> Dict[str, Any]:
+def _pick_policy(tree: Mapping[str, Any], key_hint: Optional[str]) -> Dict[str, Any]:
     if key_hint and key_hint in tree:
         candidate = tree[key_hint]
         if isinstance(candidate, dict) and "params" in candidate:
@@ -83,8 +178,11 @@ def main() -> None:
     args = parser.parse_args()
 
     params = _load_params(args.params_path)
-    if not isinstance(params, dict):
-        raise ValueError(f"Unsupported params root type: {type(params)} (expected dict).")
+    if not isinstance(params, Mapping):
+        if isinstance(params, (list, tuple)):
+            params = {f"item_{i}": v for i, v in enumerate(params)}
+        else:
+            raise ValueError(f"Unsupported params root type: {type(params)} (expected mapping).")
 
     norm = _pick_normalizer(params, args.normalizer_key or None)
     policy = _pick_policy(params, args.policy_key or None)

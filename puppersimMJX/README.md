@@ -55,8 +55,12 @@ python puppersimMJX/pupper_train_ppo_brax.py \
 
 Available starter profiles:
 * `puppersimMJX/tasks/simple_forward/config/training_profiles/simple_forward_locomotion.json`
+* `puppersimMJX/tasks/simple_forward/config/training_profiles/simple_forward_command_policy.json`
 * `puppersimMJX/tasks/cc_locomotion/config/training_profiles/command_locomotion.json`
 * `puppersimMJX/tasks/cc_locomotion/config/training_profiles/navigation_controller_template.json`
+* `puppersimMJX/tasks/navigation/config/training_profiles/sparse_navigation.json`
+* `puppersimMJX/tasks/navigation/config/training_profiles/sparse_navigation_nav_controller.json`
+* `puppersimMJX/tasks/navigation/config/training_profiles/sparse_collect_spheres.json`
 
 Notes:
 * A profile can define `env_kwargs` and optional randomization defaults.
@@ -64,6 +68,7 @@ Notes:
 * For navigation/controller experiments, duplicate the template profile and tune reward scales there.
 * Reward selection is plug-in based: set `reward_module` + `reward_config` in `env_kwargs`.
 * A reward module only needs to expose `build_reward(config)` and return `(reward, terms)` from the built callable.
+* The sparse navigation profile uses hierarchical control: PPO outputs high-level `[vx, vy, yaw]` commands and a frozen low-level locomotion bundle maps these to motor targets.
 
 Example env kwargs snippet:
 ```json
@@ -90,6 +95,40 @@ Create stable MJX XML from a fixed URDF-converted XML:
 ```bash
 python puppersimMJX/create_mujoco_xml.py
 ```
+
+Add front camera to create `puppersim/data/pupper_v2_final_stable_cam.xml`:
+```bash
+python puppersimMJX/add_camera_to_xml.py \
+  --xml-path puppersim/data/pupper_v2_final_stable.xml \
+  --output puppersim/data/pupper_v2_final_stable_cam.xml \
+  --force
+```
+
+Add a red goal marker site to create `puppersim/data/pupper_v2_final_stable_cam_goal.xml`:
+```bash
+python puppersimMJX/add_goal_marker_to_xml.py --force
+```
+
+## Run On Robot (After `deploy_to_robot.sh`)
+From your laptop (repo root), deploy to Pi and open a shell there:
+```bash
+./deploy_to_robot.sh
+```
+
+On the Pi shell (`/home/pi/puppersim_deploy`):
+
+1. Run policy on real robot (+ optional PiCam window when `DISPLAY` is available):
+```bash
+python puppersimMJX/play_policy_robot.py \
+  --bundle-dir puppersimMJX/pretrained_policies/cc_locomotion/policy_bundle
+```
+
+Keyboard controls in `play_policy_robot.py`:
+* `A/D`: x command
+* `W/S`: y command
+* `Q/E`: yaw command
+* `R`: zero command
+* `X`: exit
 
 ### Troubleshooting
 <details>

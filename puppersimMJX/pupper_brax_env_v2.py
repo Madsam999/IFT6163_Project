@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -163,6 +164,22 @@ def _build_env_class():
             lin_vel_y_range: Tuple[float, float] = (-0.5, 0.5),
             ang_vel_yaw_range: Tuple[float, float] = (-2.0, 2.0),
             zero_command_probability: float = 0.02,
+            use_low_level_policy: bool = False,
+            low_level_policy_bundle_path: str = "",
+            low_level_obs_history: int = 20,
+            low_level_include_command_in_obs: bool = True,
+            use_nav_controller: bool = False,
+            nav_kp_pos: float = 1.0,
+            nav_kp_yaw: float = 1.2,
+            nav_goal_tolerance_m: float = 0.15,
+            nav_turn_in_place_angle_rad: float = 0.55,
+            nav_max_lin_speed_mps: float = 0.6,
+            nav_max_ang_speed_rps: float = 1.2,
+            include_goal_in_obs: bool = True,
+            goal_radius_range: Tuple[float, float] = (0.8, 2.5),
+            goal_reach_tolerance: float = 0.25,
+            goal_resample_on_reach: bool = True,
+            goal_resample_step: int = 400,
             stand_still_command_threshold: float = 0.05,
             tracking_sigma: float = 0.25,
             feet_air_time_minimum: float = 0.10,
@@ -232,6 +249,7 @@ def _build_env_class():
                 add_tracking_camera=conversion_add_tracking_camera,
                 collision_mode=conversion_collision_mode,
             )
+            self._model_path = str(mjcf_path)
 
             sys = mjcf.load(str(mjcf_path))
             if "early_termination_step_threshold" in kwargs:
@@ -269,6 +287,22 @@ def _build_env_class():
             self._lin_vel_y_range = (float(lin_vel_y_range[0]), float(lin_vel_y_range[1]))
             self._ang_vel_yaw_range = (float(ang_vel_yaw_range[0]), float(ang_vel_yaw_range[1]))
             self._zero_command_probability = float(zero_command_probability)
+            self._use_low_level_policy = bool(use_low_level_policy)
+            self._low_level_policy_bundle_path = str(low_level_policy_bundle_path).strip()
+            self._low_level_obs_history = int(max(1, low_level_obs_history))
+            self._low_level_include_command_in_obs = bool(low_level_include_command_in_obs)
+            self._use_nav_controller = bool(use_nav_controller)
+            self._nav_kp_pos = float(nav_kp_pos)
+            self._nav_kp_yaw = float(nav_kp_yaw)
+            self._nav_goal_tolerance_m = float(nav_goal_tolerance_m)
+            self._nav_turn_in_place_angle_rad = float(nav_turn_in_place_angle_rad)
+            self._nav_max_lin_speed_mps = float(nav_max_lin_speed_mps)
+            self._nav_max_ang_speed_rps = float(nav_max_ang_speed_rps)
+            self._include_goal_in_obs = bool(include_goal_in_obs)
+            self._goal_radius_range = (float(goal_radius_range[0]), float(goal_radius_range[1]))
+            self._goal_reach_tolerance = float(goal_reach_tolerance)
+            self._goal_resample_on_reach = bool(goal_resample_on_reach)
+            self._goal_resample_step = int(max(1, goal_resample_step))
 
             simple_forward_cfg: Dict[str, Any] = {
                 "weight": float(reward_weight),
@@ -312,11 +346,13 @@ def _build_env_class():
             if not self._reward_module:
                 if self._reward_mode == "command_locomotion":
                     self._reward_module = "puppersimMJX.tasks.cc_locomotion.reward"
+                elif self._reward_mode == "sparse_navigation":
+                    self._reward_module = "puppersimMJX.tasks.navigation.reward_sparse"
                 elif self._reward_mode == "simple_forward":
                     self._reward_module = "puppersimMJX.tasks.simple_forward.reward"
                 else:
                     raise ValueError(
-                        "Unknown reward_mode. Set reward_mode to simple_forward/command_locomotion "
+                        "Unknown reward_mode. Set reward_mode to simple_forward/command_locomotion/sparse_navigation "
                         "or provide reward_module."
                     )
 
@@ -327,6 +363,13 @@ def _build_env_class():
                     reward_config = command_reward_cfg
                 elif self._reward_mode == "simple_forward":
                     reward_config = simple_forward_cfg
+                elif self._reward_mode == "sparse_navigation":
+                    reward_config = {
+                        "goal_tolerance": self._goal_reach_tolerance,
+                        "goal_reached_bonus": 10.0,
+                        "step_penalty": -0.01,
+                        "collision_penalty": -5.0,
+                    }
                 else:
                     reward_config = {}
             if not isinstance(reward_config, dict):
@@ -338,7 +381,7 @@ def _build_env_class():
                 self._reward_requires_command = bool(self._reward_mode == "command_locomotion")
             else:
                 self._reward_requires_command = bool(reward_requires_command)
-            effective_reward_mode = "command_locomotion" if self._reward_requires_command else "simple_forward"
+            effective_reward_mode = self._reward_mode
             print(
                 "[PupperV2BraxEnv] resolved reward settings: "
                 f"reward_mode={self._reward_mode}, "
@@ -360,6 +403,9 @@ def _build_env_class():
                     "Pupper v2 MJCF has no actuators (nu=0). "
                     "Please see puppersimMJX/README.md for XML generation steps."
                 )
+            self._policy_action_size = self._act_size
+            self._ll_obs_dim = 0
+            self._ll_action_dim = 0
 
             self._torso_idx = 0
             try:
@@ -396,9 +442,14 @@ def _build_env_class():
             self._action_high = jp.array(high)
             self._action_mid = 0.5 * (self._action_high + self._action_low)
             self._action_half_range = 0.5 * (self._action_high - self._action_low)
+
+            if self._use_low_level_policy:
+                self._load_low_level_policy()
+                self._policy_action_size = 3
+
             print(
                 "[PupperV2BraxEnv] action space: "
-                f"act_size={self._act_size}, "
+                f"act_size={self._act_size}, policy_action_size={self._policy_action_size}, "
                 f"action_scale={self._action_scale}, "
                 f"low={low.tolist()}, high={high.tolist()}"
             )
@@ -416,6 +467,127 @@ def _build_env_class():
             normalized = jp.clip(normalized, -1.0, 1.0)
             return self._action_mid + normalized * self._action_half_range
 
+        @property
+        def action_size(self) -> int:
+            return int(self._policy_action_size)
+
+        def _load_low_level_policy(self) -> None:
+            bundle_path = Path(self._low_level_policy_bundle_path).expanduser()
+            if not bundle_path.is_absolute():
+                bundle_path = (Path(_REPO_ROOT) / bundle_path).resolve()
+            meta_path = bundle_path / "policy_bundle.json"
+            npz_path = bundle_path / "policy_bundle.npz"
+            if not meta_path.exists() or not npz_path.exists():
+                raise FileNotFoundError(
+                    "Low-level policy bundle not found. "
+                    f"Expected files at: {meta_path} and {npz_path}"
+                )
+
+            meta = json.loads(meta_path.read_text())
+            arrays = np.load(npz_path, allow_pickle=False)
+
+            self._ll_obs_dim = int(meta["obs_dim"])
+            self._ll_action_dim = int(meta["action_dim"])
+            self._ll_action_head = str(meta.get("action_head", "normal_tanh")).strip().lower()
+            self._ll_activation_name = str(meta.get("activation", "elu")).strip().lower()
+            if self._ll_action_dim != self._act_size:
+                raise ValueError(
+                    "Low-level policy action_dim does not match robot actuator count: "
+                    f"{self._ll_action_dim} vs {self._act_size}"
+                )
+
+            self._ll_obs_mean = jp.array(np.asarray(arrays["obs_mean"], dtype=np.float32))
+            self._ll_obs_std = jp.array(np.asarray(arrays["obs_std"], dtype=np.float32))
+            self._ll_obs_std_eps = jp.array(np.asarray(arrays["obs_std_eps"], dtype=np.float32))
+
+            self._ll_layer_kernels = []
+            self._ll_layer_biases = []
+            for name in meta["layer_names"]:
+                self._ll_layer_kernels.append(jp.array(np.asarray(arrays[f"{name}.kernel"], dtype=np.float32)))
+                self._ll_layer_biases.append(jp.array(np.asarray(arrays[f"{name}.bias"], dtype=np.float32)))
+
+            if self._ll_obs_dim % self._low_level_obs_history != 0:
+                raise ValueError(
+                    "Low-level obs_dim is not divisible by low_level_obs_history: "
+                    f"{self._ll_obs_dim} vs {self._low_level_obs_history}"
+                )
+            self._ll_base_obs_dim = self._ll_obs_dim // self._low_level_obs_history
+            q_dim = int(self.sys.q_size()) - (2 if self._exclude_xy_from_obs else 0)
+            qd_dim = int(self.sys.qd_size())
+            command_dim = 3 if self._low_level_include_command_in_obs else 0
+            expected_base_dim = q_dim + qd_dim + command_dim
+            if expected_base_dim != self._ll_base_obs_dim:
+                raise ValueError(
+                    "Low-level base observation mismatch. "
+                    f"Expected {expected_base_dim}, bundle expects {self._ll_base_obs_dim}."
+                )
+
+            print(
+                "[PupperV2BraxEnv] loaded low-level policy bundle: "
+                f"path={bundle_path}, obs_dim={self._ll_obs_dim}, action_dim={self._ll_action_dim}, "
+                f"history={self._low_level_obs_history}, activation={self._ll_activation_name}"
+            )
+
+        def _ll_activation(self, x):
+            if self._ll_activation_name == "tanh":
+                return jp.tanh(x)
+            if self._ll_activation_name == "relu":
+                return jp.maximum(x, 0.0)
+            if self._ll_activation_name == "elu":
+                return jax.nn.elu(x)
+            if self._ll_activation_name in ("swish", "silu"):
+                return jax.nn.swish(x)
+            if self._ll_activation_name == "gelu":
+                return jax.nn.gelu(x)
+            if self._ll_activation_name == "sigmoid":
+                return jax.nn.sigmoid(x)
+            if self._ll_activation_name == "leaky_relu":
+                return jax.nn.leaky_relu(x, negative_slope=0.01)
+            raise ValueError(f"Unsupported low-level activation '{self._ll_activation_name}'.")
+
+        def _decode_command_action(self, action: Any, dtype: Any):
+            # Map normalized [-1,1] nav action to physical command ranges.
+            a = jp.clip(action, -1.0, 1.0)
+            x_mid = 0.5 * (self._lin_vel_x_range[0] + self._lin_vel_x_range[1])
+            x_half = 0.5 * (self._lin_vel_x_range[1] - self._lin_vel_x_range[0])
+            y_mid = 0.5 * (self._lin_vel_y_range[0] + self._lin_vel_y_range[1])
+            y_half = 0.5 * (self._lin_vel_y_range[1] - self._lin_vel_y_range[0])
+            z_mid = 0.5 * (self._ang_vel_yaw_range[0] + self._ang_vel_yaw_range[1])
+            z_half = 0.5 * (self._ang_vel_yaw_range[1] - self._ang_vel_yaw_range[0])
+            return jp.array(
+                [
+                    x_mid + x_half * a[0],
+                    y_mid + y_half * a[1],
+                    z_mid + z_half * a[2],
+                ],
+                dtype=dtype,
+            )
+
+        def _build_low_level_base_obs(self, pipeline_state: Any, command: Any):
+            q = pipeline_state.q
+            qd = pipeline_state.qd
+            if self._exclude_xy_from_obs and q.shape[0] > 2:
+                q = q[2:]
+            obs = jp.concatenate([q, qd], axis=0)
+            if self._low_level_include_command_in_obs:
+                obs = jp.concatenate([obs, command.astype(obs.dtype)], axis=0)
+            return obs
+
+        def _low_level_policy_action(self, ll_obs_stacked: Any):
+            denom = jp.maximum(self._ll_obs_std, self._ll_obs_std_eps)
+            x = (ll_obs_stacked - self._ll_obs_mean) / denom
+            for idx, (kernel, bias) in enumerate(zip(self._ll_layer_kernels, self._ll_layer_biases)):
+                x = x @ kernel + bias
+                if idx < len(self._ll_layer_kernels) - 1:
+                    x = self._ll_activation(x)
+            if self._ll_action_head == "normal_tanh":
+                return jp.tanh(x[: self._ll_action_dim])
+            if self._ll_action_head == "tanh":
+                return jp.tanh(x[: self._ll_action_dim])
+            if self._ll_action_head == "raw":
+                return x[: self._ll_action_dim]
+            raise ValueError(f"Unsupported low-level action_head '{self._ll_action_head}'.")
+
         def _sample_command(self, rng: jp.ndarray, dtype):
             rng, rx, ry, rz, rzprob = jax.random.split(rng, 5)
             x_cmd = jax.random.uniform(rx, (), minval=self._lin_vel_x_range[0], maxval=self._lin_vel_x_range[1])
@@ -426,7 +598,48 @@ def _build_env_class():
             command = jp.where(zero, jp.zeros_like(command), command)
             return rng, command
 
-        def _get_obs(self, pipeline_state, command=None) -> jp.ndarray:
+        def _sample_goal(self, rng: jp.ndarray, base_xy: jp.ndarray, dtype):
+            rng, rkey, akey = jax.random.split(rng, 3)
+            radius = jax.random.uniform(rkey, (), minval=self._goal_radius_range[0], maxval=self._goal_radius_range[1])
+            angle = jax.random.uniform(akey, (), minval=-jp.pi, maxval=jp.pi)
+            offset = jp.array([radius * jp.cos(angle), radius * jp.sin(angle)], dtype=dtype)
+            return rng, (base_xy + offset).astype(dtype)
+
+        def _wrap_angle(self, angle: Any):
+            return jp.arctan2(jp.sin(angle), jp.cos(angle))
+
+        def _compute_nav_controller_command(self, pipeline_state: Any, goal_xy: Any, dtype: Any):
+            base_pos = pipeline_state.x.pos[self._torso_idx]
+            base_quat = pipeline_state.x.rot[self._torso_idx]  # wxyz
+            dx = goal_xy[0] - base_pos[0]
+            dy = goal_xy[1] - base_pos[1]
+            dist = jp.sqrt(dx * dx + dy * dy)
+
+            qw, qx, qy, qz = base_quat
+            yaw = jp.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+            desired_yaw = jp.atan2(dy, dx)
+            yaw_err = self._wrap_angle(desired_yaw - yaw)
+
+            vx_w = jp.clip(self._nav_kp_pos * dx, -self._nav_max_lin_speed_mps, self._nav_max_lin_speed_mps)
+            vy_w = jp.clip(self._nav_kp_pos * dy, -self._nav_max_lin_speed_mps, self._nav_max_lin_speed_mps)
+            move_mask = jp.abs(yaw_err) < self._nav_turn_in_place_angle_rad
+            vx_w = jp.where(move_mask, vx_w, jp.asarray(0.0, dtype=dtype))
+            vy_w = jp.where(move_mask, vy_w, jp.asarray(0.0, dtype=dtype))
+
+            vx_cmd = jp.cos(yaw) * vx_w + jp.sin(yaw) * vy_w
+            vy_cmd = -jp.sin(yaw) * vx_w + jp.cos(yaw) * vy_w
+            wz_cmd = jp.clip(self._nav_kp_yaw * yaw_err, -self._nav_max_ang_speed_rps, self._nav_max_ang_speed_rps)
+
+            vx_cmd = jp.clip(vx_cmd, self._lin_vel_x_range[0], self._lin_vel_x_range[1])
+            vy_cmd = jp.clip(vy_cmd, self._lin_vel_y_range[0], self._lin_vel_y_range[1])
+            wz_cmd = jp.clip(wz_cmd, self._ang_vel_yaw_range[0], self._ang_vel_yaw_range[1])
+
+            stop_mask = dist <= self._nav_goal_tolerance_m
+            command = jp.array([vx_cmd, vy_cmd, wz_cmd], dtype=dtype)
+            command = jp.where(stop_mask, jp.zeros_like(command), command)
+            return command
+
+        def _get_obs(self, pipeline_state, command=None, goal_xy=None) -> jp.ndarray:
             q = pipeline_state.q
             qd = pipeline_state.qd
             if self._exclude_xy_from_obs and q.shape[0] > 2:
@@ -436,6 +649,13 @@ def _build_env_class():
                 if command is None:
                     command = jp.zeros((3,), dtype=obs.dtype)
                 obs = jp.concatenate([obs, command.astype(obs.dtype)], axis=0)
+            if self._include_goal_in_obs:
+                if goal_xy is None:
+                    goal_delta = jp.zeros((2,), dtype=obs.dtype)
+                else:
+                    base_xy = pipeline_state.x.pos[self._torso_idx][:2].astype(obs.dtype)
+                    goal_delta = goal_xy.astype(obs.dtype) - base_xy
+                obs = jp.concatenate([obs, goal_delta], axis=0)
             return obs
 
         def _flatten_obs_history(self, obs_hist: jp.ndarray) -> jp.ndarray:
@@ -477,8 +697,18 @@ def _build_env_class():
                 out = out + jp.sum(m.astype(jp.float32))
             return out
 
+        def _goal_distance_to_robot(self, pipeline_state: Any, goal_xy: Any):
+            base_xy = pipeline_state.x.pos[self._torso_idx][:2]
+            candidates = [base_xy]
+            for idx in self._foot_body_indices:
+                candidates.append(pipeline_state.x.pos[idx][:2])
+            points = jp.stack(candidates, axis=0) if len(candidates) > 1 else candidates[0][None, :]
+            deltas = points - goal_xy[None, :]
+            dists = jp.sqrt(jp.sum(jp.square(deltas), axis=1))
+            return jp.min(dists)
+
         def reset(self, rng: jp.ndarray) -> State:
-            rng, rng1, rng2 = jax.random.split(rng, 3)
+            rng, rng1, rng2, goal_key = jax.random.split(rng, 4)
             q = self._default_q
             if self._reset_noise_scale > 0.0 or self._reset_base_noise_scale > 0.0:
                 q_noise = jp.zeros((self.sys.q_size(),), dtype=q.dtype)
@@ -499,7 +729,22 @@ def _build_env_class():
             command = jp.zeros((3,), dtype=q.dtype)
             if self._reward_requires_command:
                 rng, command = self._sample_command(rng, q.dtype)
-            obs = self._get_obs(pipeline_state, command=command)
+
+            base_xy = pipeline_state.x.pos[self._torso_idx][:2].astype(q.dtype)
+            rng, goal_xy = self._sample_goal(goal_key, base_xy=base_xy, dtype=q.dtype)
+            goal_delta = goal_xy - base_xy
+            goal_distance = self._goal_distance_to_robot(pipeline_state, goal_xy.astype(q.dtype))
+
+            ll_hist = jp.zeros((1, 1), dtype=q.dtype)
+            if self._use_nav_controller:
+                command = self._compute_nav_controller_command(
+                    pipeline_state=pipeline_state, goal_xy=goal_xy.astype(q.dtype), dtype=q.dtype
+                )
+            if self._use_low_level_policy:
+                ll_base_obs = self._build_low_level_base_obs(pipeline_state, command=command)
+                ll_hist = jp.tile(ll_base_obs[None, :], (self._low_level_obs_history, 1))
+
+            obs = self._get_obs(pipeline_state, command=command, goal_xy=goal_xy)
             rng, noise_key = jax.random.split(rng)
             obs = self._apply_obs_noise(obs, noise_key)
             obs_history = jp.tile(obs[None, :], (self._observation_history, 1))
@@ -533,6 +778,15 @@ def _build_env_class():
                 "command_abs_yaw": zero,
                 "command_norm": zero,
                 "command_resampled": zero,
+                "goal_x": goal_xy[0],
+                "goal_y": goal_xy[1],
+                "goal_dx": goal_delta[0],
+                "goal_dy": goal_delta[1],
+                "goal_distance": goal_distance,
+                "goal_reached": zero,
+                "goal_reached_current": zero,
+                "goal_resampled": zero,
+                "goals_collected": zero,
                 "tracking_lin_error": zero,
                 "tracking_yaw_error": zero,
             }
@@ -543,7 +797,11 @@ def _build_env_class():
                 "command_rng": rng,
                 "noise_rng": noise_key,
                 "command": command.astype(obs.dtype),
+                "goal_position": goal_xy.astype(obs.dtype),
+                "goal_distance_prev": goal_distance.astype(obs.dtype),
+                "goals_collected": zero.astype(obs.dtype),
                 "obs_history": obs_history,
+                "ll_obs_history": ll_hist,
                 "last_joint_vel": jp.zeros((self._act_size,), dtype=obs.dtype),
                 "foot_air_time": jp.zeros((len(self._foot_body_indices),), dtype=obs.dtype),
                 "prev_foot_contact": jp.zeros((len(self._foot_body_indices),), dtype=jp.bool_),
@@ -551,7 +809,29 @@ def _build_env_class():
             return State(pipeline_state, obs_stacked, zero, zero, metrics, info=info)
 
         def step(self, state: State, action: jp.ndarray) -> State:
-            action = self._decode_action(action)
+            policy_action = action
+            command = state.info.get("command", jp.zeros((3,), dtype=policy_action.dtype))
+            if self._use_low_level_policy:
+                goal_xy = state.info.get(
+                    "goal_position",
+                    jp.zeros((2,), dtype=policy_action.dtype),
+                )
+                if self._use_nav_controller:
+                    command = self._compute_nav_controller_command(
+                        pipeline_state=state.pipeline_state, goal_xy=goal_xy.astype(policy_action.dtype), dtype=policy_action.dtype
+                    )
+                else:
+                    command = self._decode_command_action(policy_action, dtype=policy_action.dtype)
+                ll_base_obs = self._build_low_level_base_obs(state.pipeline_state, command=command)
+                prev_ll_hist = state.info.get(
+                    "ll_obs_history", jp.tile(ll_base_obs[None, :], (self._low_level_obs_history, 1))
+                )
+                ll_hist = jp.concatenate([prev_ll_hist[1:], ll_base_obs[None, :]], axis=0)
+                ll_obs_stacked = self._flatten_obs_history(ll_hist)
+                ll_norm_action = self._low_level_policy_action(ll_obs_stacked)
+                action = self._decode_action(ll_norm_action)
+            else:
+                action = self._decode_action(policy_action)
             pipeline_state_0 = state.pipeline_state
             pipeline_state = self.pipeline_step(pipeline_state_0, action)
             noise_rng = state.info["noise_rng"]
@@ -604,7 +884,10 @@ def _build_env_class():
                     last_action_noise_key, last_action.shape, dtype=last_action.dtype
                 )
                 last_action = last_action + n
-            command = state.info.get("command", jp.zeros((3,), dtype=action.dtype))
+            goal_xy = state.info.get(
+                "goal_position",
+                jp.zeros((2,), dtype=action.dtype),
+            )
 
             motor_velocities = None
             if hasattr(pipeline_state, "qd"):
@@ -678,6 +961,8 @@ def _build_env_class():
                 "body_collision": body_collision,
                 "raw_done": raw_done,
                 "episode_step": episode_step,
+                "goal_position": goal_xy,
+                "goal_distance_override": self._goal_distance_to_robot(pipeline_state, goal_xy.astype(action.dtype)),
             }
             reward, reward_terms = self._reward_fn(reward_ctx)
             task_reward = reward_terms.get("task_reward", reward)
@@ -699,6 +984,27 @@ def _build_env_class():
                 command = jp.where(should_resample, new_command, command)
                 command_resampled = should_resample.astype(reward.dtype)
 
+            base_xy = pos1[:2].astype(reward.dtype)
+            goal_delta = goal_xy.astype(reward.dtype) - base_xy
+            goal_distance = self._goal_distance_to_robot(pipeline_state, goal_xy.astype(reward.dtype))
+            goal_reached = (goal_distance <= self._goal_reach_tolerance).astype(reward.dtype)
+            goal_reached_event = reward_terms.get("goal_reached", goal_reached)
+            goals_collected = state.info.get("goals_collected", jp.asarray(0.0, dtype=reward.dtype))
+            goals_collected = goals_collected + goal_reached_event.astype(reward.dtype)
+            goal_resampled = jp.asarray(0.0, dtype=reward.dtype)
+            if self._reward_mode == "sparse_navigation":
+                command_rng, goal_sample_key = jax.random.split(command_rng)
+                _, sampled_goal = self._sample_goal(goal_sample_key, base_xy=base_xy, dtype=reward.dtype)
+                should_resample_goal = (
+                    ((episode_step % self._goal_resample_step) == 0)
+                    | (self._goal_resample_on_reach & (goal_reached > 0.5))
+                )
+                goal_xy = jp.where(should_resample_goal, sampled_goal, goal_xy)
+                goal_resampled = should_resample_goal.astype(reward.dtype)
+                goal_delta = goal_xy.astype(reward.dtype) - base_xy
+                goal_distance = self._goal_distance_to_robot(pipeline_state, goal_xy.astype(reward.dtype))
+                goal_reached = (goal_distance <= self._goal_reach_tolerance).astype(reward.dtype)
+
             base_vel_world = pipeline_state.xd.vel[self._torso_idx]
             base_ang_world = pipeline_state.xd.ang[self._torso_idx]
             local_vel = math.rotate(base_vel_world, math.quat_inv(torso_quat))
@@ -706,7 +1012,7 @@ def _build_env_class():
             tracking_lin_error = jp.linalg.norm(command[:2] - local_vel[:2])
             tracking_yaw_error = jp.abs(command[2] - local_ang[2])
 
-            obs = self._get_obs(pipeline_state, command=command)
+            obs = self._get_obs(pipeline_state, command=command, goal_xy=goal_xy)
             obs = self._apply_obs_noise(obs, obs_noise_key)
             prev_hist = state.info.get("obs_history", jp.tile(obs[None, :], (self._observation_history, 1)))
             new_hist = jp.concatenate([prev_hist[1:], obs[None, :]], axis=0)
@@ -736,6 +1042,15 @@ def _build_env_class():
                 command_abs_yaw=jp.abs(command[2]),
                 command_norm=jp.linalg.norm(command),
                 command_resampled=command_resampled,
+                goal_x=goal_xy[0],
+                goal_y=goal_xy[1],
+                goal_dx=goal_delta[0],
+                goal_dy=goal_delta[1],
+                goal_distance=goal_distance,
+                goal_reached=goal_reached_event,
+                goal_reached_current=goal_reached,
+                goal_resampled=goal_resampled,
+                goals_collected=goals_collected,
                 tracking_lin_error=tracking_lin_error,
                 tracking_yaw_error=tracking_yaw_error,
             )
@@ -755,7 +1070,16 @@ def _build_env_class():
             info["command_rng"] = command_rng
             info["noise_rng"] = noise_rng
             info["command"] = command
+            info["goal_position"] = goal_xy
+            info["goal_distance_prev"] = goal_distance
+            info["goals_collected"] = goals_collected
             info["obs_history"] = new_hist
+            if self._use_low_level_policy:
+                ll_base_obs_new = self._build_low_level_base_obs(pipeline_state, command=command)
+                prev_ll_hist = state.info.get(
+                    "ll_obs_history", jp.tile(ll_base_obs_new[None, :], (self._low_level_obs_history, 1))
+                )
+                info["ll_obs_history"] = jp.concatenate([prev_ll_hist[1:], ll_base_obs_new[None, :]], axis=0)
             if self._reward_requires_command:
                 info["last_joint_vel"] = (
                     motor_velocities if motor_velocities is not None else jp.zeros((self._act_size,), dtype=obs.dtype)

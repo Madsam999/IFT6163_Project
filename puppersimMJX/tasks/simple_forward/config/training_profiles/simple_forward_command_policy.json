@@ -1,0 +1,37 @@
+{
+  "name": "simple_forward_command_policy",
+  "description": "PPO learns high-level velocity commands from observations; frozen low-level locomotion maps commands to motor actions.",
+  "env_kwargs": {
+    "model_path": "puppersim/data/pupper_v2_final_stable.xml",
+    "urdf_path": "puppersim/data/pupper_v2a.urdf",
+    "auto_generate_mjcf": false,
+    "regenerate_mjcf_if_exists": false,
+    "action_scale": 1.0,
+    "reward_module": "puppersimMJX.tasks.simple_forward.reward",
+    "reward_requires_command": false,
+    "reward_config": {
+      "weight": 1.0,
+      "divide_with_dt": false,
+      "clip_velocity": 0.0025,
+      "weight_action_accel": 0.0,
+      "energy_penalty_coef": 0.0,
+      "torque_penalty_coef": 0.0001,
+      "forward_axis": "y_neg",
+      "allow_action_torque_fallback": false
+    },
+    "use_low_level_policy": true,
+    "low_level_policy_bundle_path": "puppersimMJX/pretrained_policies/cc_locomotion/policy_bundle",
+    "low_level_obs_history": 20,
+    "low_level_include_command_in_obs": true,
+    "use_nav_controller": false,
+    "include_goal_in_obs": false,
+    "healthy_z_range": [0.05, 0.6],
+    "terminal_roll_pitch_threshold": 0.4,
+    "use_pybullet_terminal_condition": true,
+    "terminate_when_unhealthy": true,
+    "reset_noise_scale": 0.0,
+    "reset_base_noise_scale": 0.0,
+    "reset_qd_noise_scale": 0.0,
+    "exclude_xy_from_obs": true
+  }
+}
