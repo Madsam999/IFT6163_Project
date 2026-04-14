@@ -1,0 +1,22 @@
+{
+  "source_params_path": "puppersimMJX/pretrained_policies/cc_locomotion/puppermjx_train_ppo.npz",
+  "activation": "elu",
+  "obs_dim": 760,
+  "action_dim": 12,
+  "policy_output_dim": 24,
+  "hidden_sizes": [
+    256,
+    128,
+    128,
+    128
+  ],
+  "layer_names": [
+    "hidden_0",
+    "hidden_1",
+    "hidden_2",
+    "hidden_3",
+    "hidden_4"
+  ],
+  "action_head": "normal_tanh",
+  "notes": "Use with puppersimMJX/pupper_brax_policy_bundle.py for deterministic inference."
+}

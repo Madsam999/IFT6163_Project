@@ -17,7 +17,7 @@ def _activation_fn(name: str) -> Callable[[np.ndarray], np.ndarray]:
     if key == "relu":
         return lambda x: np.maximum(x, 0.0)
     if key == "elu":
-        return lambda x: np.where(x > 0.0, x, np.expm1(x))
+        return lambda x: np.where(x > 0.0, x, np.expm1(np.clip(x, -60.0, 60.0)))
     if key == "sigmoid":
         return lambda x: 1.0 / (1.0 + np.exp(-x))
     if key in ("swish", "silu"):
@@ -90,4 +90,3 @@ class BraxPolicyBundle:
         if self.action_head == "raw":
             return out[..., : self.action_dim].astype(np.float32)
         raise ValueError(f"Unsupported action_head '{self.action_head}'.")
-
