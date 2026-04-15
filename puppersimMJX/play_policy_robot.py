@@ -14,7 +14,6 @@ import tty
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-import msgpack
 import numpy as np
 
 try:
@@ -25,14 +24,12 @@ except Exception:
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-_STANFORD_ROOT = os.path.join(_REPO_ROOT, "StanfordQuadruped")
-if _STANFORD_ROOT not in sys.path:
-    sys.path.insert(0, _STANFORD_ROOT)
 
-from djipupper import HardwareInterface
-from djipupper.IndividualConfig import SERIAL_PORT
+from pupper_hardware_interface import interface
 from puppersim import pupper_constants
 from puppersimMJX.pupper_brax_policy_bundle import BraxPolicyBundle
+
+_DEFAULT_SERIAL_PORT = "/dev/ttyACM0"
 
 
 def _parse_env_kwargs(raw: str) -> Dict[str, Any]:
@@ -100,46 +97,6 @@ class _TerminalKeyReader:
         return out
 
 
-def _latest_packet(hw: HardwareInterface.HardwareInterface) -> Optional[Dict[str, Any]]:
-    latest = None
-    while True:
-        payload = hw.reader.chew()
-        if not payload:
-            return latest
-        try:
-            decoded = msgpack.unpackb(payload)
-            if isinstance(decoded, dict):
-                latest = decoded
-        except Exception:
-            continue
-
-
-def _pick_vec(d: Dict[str, Any], candidates: list[str], n: int) -> Optional[np.ndarray]:
-    lower = {str(k).lower(): v for k, v in d.items()}
-    for k in candidates:
-        if k.lower() not in lower:
-            continue
-        v = lower[k.lower()]
-        if isinstance(v, (list, tuple, np.ndarray)) and len(v) >= n:
-            return np.asarray(v[:n], dtype=np.float32)
-    return None
-
-
-def _pick_scalar(d: Dict[str, Any], candidates: list[str], default: float = 0.0) -> float:
-    lower = {str(k).lower(): v for k, v in d.items()}
-    for k in candidates:
-        if k.lower() in lower:
-            try:
-                return float(lower[k.lower()])
-            except Exception:
-                pass
-    return float(default)
-
-
-def _as_joint_matrix(cmd12: np.ndarray) -> np.ndarray:
-    return np.asarray(cmd12, dtype=np.float32).reshape(4, 3).T
-
-
 def _camera_setup(source: str, width: int, height: int, fps: int, show: bool):
     if not show:
         return None
@@ -187,7 +144,7 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default="puppersimMJX/tasks/cc_locomotion/config/pupper_brax_env_kwargs.command_locomotion.json",
     )
-    p.add_argument("--serial-port", type=str, default=SERIAL_PORT)
+    p.add_argument("--serial-port", type=str, default=_DEFAULT_SERIAL_PORT)
     p.add_argument("--seconds", type=float, default=0.0, help="<=0 means run until Ctrl+C")
     p.add_argument("--policy-dt", type=float, default=0.02)
     p.add_argument("--action-scale", type=float, default=0.75)
@@ -224,11 +181,10 @@ def main() -> None:
     exclude_xy = bool(env_cfg.get("exclude_xy_from_obs", True))
     obs_hist_len = int(max(1, env_cfg.get("observation_history", 20)))
 
-    hw = HardwareInterface.HardwareInterface(port=args.serial_port)
-    time.sleep(0.1)
-    hw.set_joint_space_parameters(float(args.kp), float(args.kd), float(args.max_current))
-    hw.activate()
-    print(f"activated on {args.serial_port}")
+    hw = interface.Interface(args.serial_port)
+    time.sleep(0.25)
+    hw.set_joint_space_parameters(kp=float(args.kp), kd=float(args.kd), max_current=float(args.max_current))
+    print(f"connected on {args.serial_port}")
     print("controls: A/D=x, W/S=y, Q/E=yaw, R=zero cmd, X=exit")
 
     cap = _camera_setup(
@@ -258,28 +214,25 @@ def main() -> None:
     cmd_rng_yaw = (float(args.yaw_min), float(args.yaw_max))
     key_state = {"x+": 0.0, "x-": 0.0, "y+": 0.0, "y-": 0.0, "yaw+": 0.0, "yaw-": 0.0}
 
-    # Wait for first packet with motor position/velocity.
-    state_pkt = None
+    # Wait for first valid state from robot.
+    robot_state = None
     t0 = time.monotonic()
-    while state_pkt is None and (time.monotonic() - t0) < 3.0:
-        state_pkt = _latest_packet(hw)
+    while robot_state is None and (time.monotonic() - t0) < 3.0:
+        hw.read_incoming_data()
+        robot_state = hw.robot_state
         time.sleep(0.002)
-    if state_pkt is None:
-        raise RuntimeError("No telemetry packet received from robot within 3s.")
+    if robot_state is None:
+        raise RuntimeError("No state received from robot within 3s.")
 
-    def build_obs(pkt: Dict[str, Any], command: np.ndarray) -> np.ndarray:
-        pos = _pick_vec(pkt, ["position", "pos", "q", "joint_position"], 12)
-        vel = _pick_vec(pkt, ["velocity", "vel", "qd", "joint_velocity"], 12)
-        if pos is None:
-            pos = np.zeros(12, dtype=np.float32)
-        if vel is None:
-            vel = np.zeros(12, dtype=np.float32)
-        roll = _pick_scalar(pkt, ["roll"], 0.0)
-        pitch = _pick_scalar(pkt, ["pitch"], 0.0)
-        yaw = _pick_scalar(pkt, ["yaw"], 0.0)
-        roll_rate = _pick_scalar(pkt, ["roll_rate", "droll"], 0.0)
-        pitch_rate = _pick_scalar(pkt, ["pitch_rate", "dpitch"], 0.0)
-        yaw_rate = _pick_scalar(pkt, ["yaw_rate", "dyaw"], 0.0)
+    def build_obs(rs, command: np.ndarray) -> np.ndarray:
+        pos = np.asarray(rs.position, dtype=np.float32)[:12]
+        vel = np.asarray(rs.velocity, dtype=np.float32)[:12]
+        roll = float(rs.roll)
+        pitch = float(rs.pitch)
+        yaw = float(rs.yaw)
+        roll_rate = float(rs.roll_rate)
+        pitch_rate = float(rs.pitch_rate)
+        yaw_rate = float(rs.yaw_rate)
 
         q = np.concatenate(
             [np.array([0.0, 0.0, float(args.base_height)], dtype=np.float32), _rpy_to_quat_wxyz(roll, pitch, yaw), pos],
@@ -296,7 +249,7 @@ def main() -> None:
             obs = np.concatenate([obs, command.astype(np.float32)], axis=0)
         return obs
 
-    first_obs = build_obs(state_pkt, cmd)
+    first_obs = build_obs(robot_state, cmd)
     expected_dim = obs_hist_len * int(first_obs.shape[0])
     if expected_dim != bundle.obs_dim:
         raise ValueError(
@@ -350,10 +303,10 @@ def main() -> None:
                 cmd[2] = yaw_in * float(args.yaw_speed)
                 cmd = _clip_command(cmd, cmd_rng_x, cmd_rng_y, cmd_rng_yaw)
 
-                pkt = _latest_packet(hw)
-                if pkt is not None:
-                    state_pkt = pkt
-                base_obs = build_obs(state_pkt, cmd)
+                hw.read_incoming_data()
+                robot_state = hw.robot_state
+
+                base_obs = build_obs(robot_state, cmd)
                 obs_hist = np.concatenate([obs_hist[1:], base_obs[None, :]], axis=0)
                 obs = obs_hist.reshape(-1)
                 a_unit = np.asarray(bundle.deterministic_action(obs), dtype=np.float32)[:act_dim]
@@ -361,7 +314,7 @@ def main() -> None:
 
                 cmd12 = np.zeros(12, dtype=np.float32)
                 cmd12[:act_dim] = np.clip(target, low, high)
-                hw.set_actuator_postions(_as_joint_matrix(cmd12))
+                hw.set_actuator_postions(np.array(cmd12))
 
                 if cap is not None:
                     ok, frame = cap.read()
@@ -414,15 +367,11 @@ def main() -> None:
                 else:
                     next_tick = time.monotonic()
     finally:
-        try:
-            hw.deactivate()
-        except Exception:
-            pass
         if cap is not None:
             cap.release()
         if cv2 is not None:
             cv2.destroyAllWindows()
-        print("\nrobot deactivated")
+        print("\nshutdown complete")
 
 
 if __name__ == "__main__":
