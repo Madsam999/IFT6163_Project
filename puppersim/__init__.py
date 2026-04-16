@@ -30,7 +30,7 @@ register(
   reward_threshold=50.0,
 )
 
-  register(
+register(
     id='ReacherEnv-v0',
     entry_point='puppersim.reacher.reacher_env:ReacherEnv',
     max_episode_steps=150,
