@@ -685,6 +685,15 @@ def _filter_kwargs(fn: Callable[..., Any], kwargs: Mapping[str, Any]) -> Dict[st
     return {key: value for key, value in kwargs.items() if key in signature.parameters}
 
 
+def _is_cuda_graph_capture_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "cuda graph capture failed" in text
+        or "cuda_error_stream_capture_unsupported" in text
+        or "ffi callback error" in text
+    )
+
+
 def _wrap_env_no_vmap(env: Any, episode_length: int, action_repeat: int, randomization_fn: Optional[Callable[..., Any]] = None):
     from brax.envs.wrappers import training as training_wrappers
 
@@ -900,31 +909,8 @@ def main(args: Args) -> None:
                 f"resolution={video_w}x{video_h}, renderer={video_renderer_mode}"
             )
         except Exception as exc:
-            print(f"warning: failed to configure dedicated video cameras, trying MJX fallback: {exc}")
-            try:
-                video_main_renderer = _build_single_world_renderer(
-                    base_env,
-                    args,
-                    camera_name=args.video_main_camera_name,
-                    image_width=video_w,
-                    image_height=video_h,
-                )
-                inset_name = str(args.video_inset_camera_name or "").strip()
-                if inset_name:
-                    video_inset_renderer = _build_single_world_renderer(
-                        base_env,
-                        args,
-                        camera_name=inset_name,
-                        image_width=video_w,
-                        image_height=video_h,
-                    )
-                print(
-                    "info: video cameras configured with MJX fallback: "
-                    f"main={args.video_main_camera_name}, inset={args.video_inset_camera_name or 'disabled'}, "
-                    f"resolution={video_w}x{video_h}, renderer=mjx"
-                )
-            except Exception as exc2:
-                print(f"warning: MJX fallback failed, using obs pixels for videos: {exc2}")
+            print(f"warning: failed to configure dedicated video cameras: {exc}")
+            print("info: using observation pixels for videos to avoid renderer instability in headless mode")
     if bool(args.normalize_observations) and not bool(args.include_state_in_obs):
         print("warning: normalize_observations=true ignored for pixels-only obs; disabling normalization.")
         args.normalize_observations = False
@@ -988,7 +974,7 @@ def main(args: Args) -> None:
         except Exception as exc:
             print(f"wandb init failed, disabling tracking: {exc}")
 
-    video_state = {"next_step": max(1, int(args.video_interval))}
+    video_state = {"next_step": max(1, int(args.video_interval)), "disabled": False}
     default_video_fps = max(1, int(round(1.0 / float(base_env.dt))))
     video_fps = int(args.video_fps) if int(args.video_fps) > 0 else default_video_fps
 
@@ -1017,6 +1003,9 @@ def main(args: Args) -> None:
         print(f"step={step}, reward={reward:.3f}, kl={kl:.5f}, sps={sps:.0f}")
 
     def policy_params_fn(step: int, make_policy_builder: Callable[..., Any], params: Any) -> None:
+        if bool(video_state["disabled"]):
+            return
+
         if bool(args.debug_eval_obs_sampling):
             frames_dir: Optional[Path] = None
             if bool(args.debug_eval_save_frames):
@@ -1043,19 +1032,29 @@ def main(args: Args) -> None:
         if not (do_periodic or do_initial):
             return
 
-        frames = _build_video_rollout(
-            env=vision_env,
-            make_policy_builder=make_policy_builder,
-            params=params,
-            seed=args.seed + 10_000 + int(step),
-            num_steps=int(args.video_steps),
-            render_main_fn=video_main_renderer,
-            render_inset_fn=video_inset_renderer,
-            inset_scale=float(args.video_inset_scale),
-            inset_margin=int(args.video_inset_margin),
-            video_brightness=float(args.video_brightness),
-            video_gamma=float(args.video_gamma),
-        )
+        try:
+            frames = _build_video_rollout(
+                env=vision_env,
+                make_policy_builder=make_policy_builder,
+                params=params,
+                seed=args.seed + 10_000 + int(step),
+                num_steps=int(args.video_steps),
+                render_main_fn=video_main_renderer,
+                render_inset_fn=video_inset_renderer,
+                inset_scale=float(args.video_inset_scale),
+                inset_margin=int(args.video_inset_margin),
+                video_brightness=float(args.video_brightness),
+                video_gamma=float(args.video_gamma),
+            )
+        except Exception as exc:
+            if _is_cuda_graph_capture_error(exc):
+                video_state["disabled"] = True
+                print(
+                    "warning: disabling training-time video capture after CUDA graph capture failure: "
+                    f"{exc}"
+                )
+                return
+            raise
         video_path = Path(args.video_dirname) / run_name / f"{args.exp_name}_step_{int(step):012d}.mp4"
         _save_video_mp4(frames, video_path, fps=video_fps)
         print(f"video saved: {video_path}")
