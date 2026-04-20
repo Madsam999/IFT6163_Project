@@ -31,6 +31,13 @@ register(
 )
 
 register(
+  id='PupperAprilTagPixelEnv-v0',
+  entry_point='puppersim.pupper_apriltag_pixel_env:PupperAprilTagPixelEnv',
+  max_episode_steps=500,
+  reward_threshold=50.0,
+)
+
+register(
     id='ReacherEnv-v0',
     entry_point='puppersim.reacher.reacher_env:ReacherEnv',
     max_episode_steps=150,

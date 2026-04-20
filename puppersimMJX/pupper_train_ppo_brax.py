@@ -793,6 +793,7 @@ if __name__ == "__main__":
     eval_log_state = {"next_step": 0}
     video_state = {
         "next_step": 0,
+        "initial_saved": False,
     }
     log_state = {"max_step": 0}
     train_reward_window = deque(maxlen=10)
@@ -854,6 +855,52 @@ if __name__ == "__main__":
     def policy_params_fn(current_step: int, _make_policy: Callable[..., Any], params: Any):
         step = int(current_step)
         log_state["max_step"] = max(log_state["max_step"], step)
+
+        if args.capture_video and not bool(video_state["initial_saved"]):
+            initial_video_path = (
+                Path(args.video_dirname)
+                / run_name
+                / f"{save_prefix}_initial.mp4"
+            )
+            _save_rollout_video_from_policy_builder(
+                env=eval_env,
+                make_policy_builder=_make_policy,
+                params=params,
+                seed=args.seed + 7777,
+                output_path=initial_video_path,
+                num_steps=args.video_steps,
+                width=args.video_width,
+                height=args.video_height,
+                camera=args.video_camera or None,
+                front_camera_inset=bool(args.video_front_camera_inset),
+                front_camera_name=(args.video_front_camera_name or None),
+                front_inset_scale=float(args.video_front_inset_scale),
+                randomize_goal_marker=bool(args.video_randomize_goal_marker),
+                goal_marker_site_name=str(args.video_goal_marker_site_name),
+                goal_marker_radius_min=float(args.video_goal_marker_radius_min),
+                goal_marker_radius_max=float(args.video_goal_marker_radius_max),
+                goal_marker_z=float(args.video_goal_marker_z),
+                sync_goal_marker_to_collectible=bool(args.video_sync_goal_marker_to_collectible),
+                fps=args.video_fps,
+            )
+            video_state["initial_saved"] = True
+            last_video_state["path"] = initial_video_path
+            print(f"initial video saved to {initial_video_path}")
+            if wandb is not None:
+                try:
+                    wandb.log(
+                        {
+                            "episode_video": wandb.Video(
+                                str(initial_video_path),
+                                format="mp4",
+                            ),
+                            "num_steps": step,
+                        },
+                        step=step,
+                    )
+                except Exception as exc:
+                    print(f"wandb initial video log failed at step={step}: {exc}")
+
         if args.save_checkpoints and step >= checkpoint_state["next_step"]:
             checkpoint_path = checkpoint_dir / f"{save_prefix}_step_{step:012d}{params_ext}"
             fmt = _save_params(checkpoint_path, params)

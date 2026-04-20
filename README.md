@@ -67,6 +67,59 @@ python puppersim/pupper_train_ppo_cont_action.py --seed 1 --env-id PupperGymEnv-
 ```
 Depending on your computer specs, each training iteration will take around 1 - 5 seconds.
 
+### True Pixel AprilTag Training (CNN policy)
+For real camera-pixel observations (not handcrafted tag features), use:
+```bash
+python puppersim/pupper_train_ppo_pixels.py \
+  --env-id PupperAprilTagPixelEnv-v0 \
+  --total-timesteps 3000000 \
+  --image-width 84 \
+  --image-height 84 \
+  --tag-id 101 \
+  --frame-stack 4 \
+  --save-model
+```
+Notes:
+* This uses a separate CNN PPO pipeline.
+* Observations are true front-camera pixel frames (`uint8`), stacked in channels (`C,H,W`).
+* Environment id: `PupperAprilTagPixelEnv-v0`.
+* To reuse the MJX pretrained low-level policy (hierarchical setup), add:
+```bash
+python puppersim/pupper_train_ppo_pixels.py \
+  --env-id PupperAprilTagPixelEnv-v0 \
+  --use-low-level-policy \
+  --low-level-policy-bundle-path puppersimMJX/pretrained_policies/cc_locomotion/policy_bundle \
+  --high-level-policy-hz 4.0 \
+  --total-timesteps 3000000 \
+  --image-width 84 \
+  --image-height 84 \
+  --frame-stack 4 \
+  --save-model
+```
+
+### Visualize Pixel Env (like play_policy_sim)
+Open PyBullet + pixel camera window and drive high-level commands manually:
+```bash
+python puppersim/pupper_play_pixel_env.py \
+  --mode keyboard \
+  --use-low-level-policy \
+  --low-level-policy-bundle-path puppersimMJX/pretrained_policies/cc_locomotion/policy_bundle \
+  --high-level-policy-hz 4.0 \
+  --show-camera
+```
+Controls: `A/D` x, `W/S` y, `Q/E` yaw, `R` zero, `X` exit.
+
+Run your trained high-level pixel policy in the same viewer:
+```bash
+python puppersim/pupper_play_pixel_env.py \
+  --mode policy \
+  --checkpoint-path runs/<run_name>/pupper_train_ppo_pixels.pt \
+  --use-low-level-policy \
+  --low-level-policy-bundle-path puppersimMJX/pretrained_policies/cc_locomotion/policy_bundle \
+  --high-level-policy-hz 4.0 \
+  --show-camera
+```
+
 ### MJX/Brax PPO training
 You can also train Pupper v2 with Brax PPO on MJX backends:
 ```bash

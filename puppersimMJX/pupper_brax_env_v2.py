@@ -168,6 +168,7 @@ def _build_env_class():
             low_level_policy_bundle_path: str = "",
             low_level_obs_history: int = 20,
             low_level_include_command_in_obs: bool = True,
+            high_level_policy_hz: float = 0.0,
             use_nav_controller: bool = False,
             nav_kp_pos: float = 1.0,
             nav_kp_yaw: float = 1.2,
@@ -176,10 +177,27 @@ def _build_env_class():
             nav_max_lin_speed_mps: float = 0.6,
             nav_max_ang_speed_rps: float = 1.2,
             include_goal_in_obs: bool = True,
+            high_level_obs_mode: str = "state",
             goal_radius_range: Tuple[float, float] = (0.8, 2.5),
             goal_reach_tolerance: float = 0.25,
             goal_resample_on_reach: bool = True,
             goal_resample_step: int = 400,
+            apriltag_wall_offset: float = 2.0,
+            apriltag_wall_span: float = 1.5,
+            apriltag_height: float = 0.35,
+            apriltag_use_bad_tag: bool = True,
+            apriltag_randomize_good_goal_on_reset: bool = False,
+            apriltag_randomize_front_wall_only: bool = True,
+            apriltag_wall_num_slots: int = 0,
+            apriltag_end_episode_on_collect: bool = True,
+            apriltag_deactivate_on_collect: bool = True,
+            apriltag_inactive_pose_xyz: Tuple[float, float, float] = (1000.0, 1000.0, -1000.0),
+            front_camera_offset_in_body: Tuple[float, float, float] = (0.0001, -0.147, -0.0064),
+            front_camera_forward_in_body: Tuple[float, float, float] = (0.0, -1.0, 0.0),
+            front_camera_up_in_body: Tuple[float, float, float] = (0.0, 0.0, 1.0),
+            camera_obs_fov_deg: float = 70.0,
+            camera_obs_distance_scale: float = 2.0,
+            camera_obs_uv_bins: int = 0,
             stand_still_command_threshold: float = 0.05,
             tracking_sigma: float = 0.25,
             feet_air_time_minimum: float = 0.10,
@@ -291,6 +309,7 @@ def _build_env_class():
             self._low_level_policy_bundle_path = str(low_level_policy_bundle_path).strip()
             self._low_level_obs_history = int(max(1, low_level_obs_history))
             self._low_level_include_command_in_obs = bool(low_level_include_command_in_obs)
+            self._high_level_policy_hz = float(max(0.0, high_level_policy_hz))
             self._use_nav_controller = bool(use_nav_controller)
             self._nav_kp_pos = float(nav_kp_pos)
             self._nav_kp_yaw = float(nav_kp_yaw)
@@ -299,10 +318,35 @@ def _build_env_class():
             self._nav_max_lin_speed_mps = float(nav_max_lin_speed_mps)
             self._nav_max_ang_speed_rps = float(nav_max_ang_speed_rps)
             self._include_goal_in_obs = bool(include_goal_in_obs)
+            self._high_level_obs_mode = str(high_level_obs_mode).strip().lower()
             self._goal_radius_range = (float(goal_radius_range[0]), float(goal_radius_range[1]))
             self._goal_reach_tolerance = float(goal_reach_tolerance)
             self._goal_resample_on_reach = bool(goal_resample_on_reach)
             self._goal_resample_step = int(max(1, goal_resample_step))
+            self._apriltag_wall_offset = float(apriltag_wall_offset)
+            self._apriltag_wall_span = float(apriltag_wall_span)
+            self._apriltag_height = float(apriltag_height)
+            self._apriltag_use_bad_tag = bool(apriltag_use_bad_tag)
+            self._apriltag_randomize_good_goal_on_reset = bool(apriltag_randomize_good_goal_on_reset)
+            self._apriltag_randomize_front_wall_only = bool(apriltag_randomize_front_wall_only)
+            self._apriltag_wall_num_slots = int(max(0, apriltag_wall_num_slots))
+            self._apriltag_end_episode_on_collect = bool(apriltag_end_episode_on_collect)
+            self._apriltag_deactivate_on_collect = bool(apriltag_deactivate_on_collect)
+            self._apriltag_inactive_pose_xyz = jp.array(tuple(float(x) for x in apriltag_inactive_pose_xyz))
+            self._front_camera_offset_in_body = jp.array(tuple(float(x) for x in front_camera_offset_in_body))
+            self._front_camera_forward_in_body = jp.array(tuple(float(x) for x in front_camera_forward_in_body))
+            self._front_camera_up_in_body = jp.array(tuple(float(x) for x in front_camera_up_in_body))
+            self._camera_obs_fov_deg = float(camera_obs_fov_deg)
+            self._camera_obs_distance_scale = float(max(1e-6, camera_obs_distance_scale))
+            self._camera_obs_uv_bins = int(max(0, camera_obs_uv_bins))
+            fov_rad = np.deg2rad(self._camera_obs_fov_deg)
+            self._camera_obs_tan_half_fov = float(np.tan(0.5 * fov_rad))
+            if self._high_level_obs_mode not in ("state", "state_full", "camera"):
+                raise ValueError(
+                    f"Unknown high_level_obs_mode='{self._high_level_obs_mode}'. Use state/state_full/camera."
+                )
+            if self._high_level_obs_mode == "state_full":
+                self._exclude_xy_from_obs = False
 
             simple_forward_cfg: Dict[str, Any] = {
                 "weight": float(reward_weight),
@@ -348,11 +392,13 @@ def _build_env_class():
                     self._reward_module = "puppersimMJX.tasks.cc_locomotion.reward"
                 elif self._reward_mode == "sparse_navigation":
                     self._reward_module = "puppersimMJX.tasks.navigation.reward_sparse"
+                elif self._reward_mode == "apriltag_walls":
+                    self._reward_module = "puppersimMJX.tasks.apriltag_walls.reward"
                 elif self._reward_mode == "simple_forward":
                     self._reward_module = "puppersimMJX.tasks.simple_forward.reward"
                 else:
                     raise ValueError(
-                        "Unknown reward_mode. Set reward_mode to simple_forward/command_locomotion/sparse_navigation "
+                        "Unknown reward_mode. Set reward_mode to simple_forward/command_locomotion/sparse_navigation/apriltag_walls "
                         "or provide reward_module."
                     )
 
@@ -369,6 +415,19 @@ def _build_env_class():
                         "goal_reached_bonus": 10.0,
                         "step_penalty": -0.01,
                         "collision_penalty": -5.0,
+                    }
+                elif self._reward_mode == "apriltag_walls":
+                    reward_config = {
+                        "visible_reward": 1.0,
+                        "alignment_weight": 0.6,
+                        "centering_weight": 0.8,
+                        "distance_weight": 0.15,
+                        "bad_visible_penalty": 1.2,
+                        "bad_alignment_penalty": 0.5,
+                        "bad_centering_penalty": 0.7,
+                        "bad_distance_penalty": 0.2,
+                        "contrastive_distance_weight": 0.2,
+                        "action_penalty_weight": 0.01,
                     }
                 else:
                     reward_config = {}
@@ -406,6 +465,7 @@ def _build_env_class():
             self._policy_action_size = self._act_size
             self._ll_obs_dim = 0
             self._ll_action_dim = 0
+            self._high_level_hold_steps = 1
 
             self._torso_idx = 0
             try:
@@ -446,6 +506,10 @@ def _build_env_class():
             if self._use_low_level_policy:
                 self._load_low_level_policy()
                 self._policy_action_size = 3
+                if self._high_level_policy_hz > 0.0:
+                    self._high_level_hold_steps = int(max(1, round(1.0 / (self._high_level_policy_hz * float(self.dt)))))
+                else:
+                    self._high_level_hold_steps = 1
 
             print(
                 "[PupperV2BraxEnv] action space: "
@@ -453,6 +517,13 @@ def _build_env_class():
                 f"action_scale={self._action_scale}, "
                 f"low={low.tolist()}, high={high.tolist()}"
             )
+            if self._use_low_level_policy:
+                print(
+                    "[PupperV2BraxEnv] high-level command rate: "
+                    f"target_hz={self._high_level_policy_hz:.3f}, "
+                    f"hold_steps={self._high_level_hold_steps}, "
+                    f"effective_hz={1.0 / (self._high_level_hold_steps * float(self.dt)):.3f}"
+                )
 
             default_q = np.asarray(self.sys.init_q, dtype=np.float32)
             if default_q.shape[0] >= 19:
@@ -461,6 +532,131 @@ def _build_env_class():
                 default_q[3:7] = _init_orientation_wxyz().astype(np.float32)
                 default_q[7:19] = _motor_init_angles_urdf_convention().astype(np.float32)
             self._default_q = jp.array(default_q)
+
+            self._apriltag_good_geom_idx = -1
+            self._apriltag_bad_geom_idx = -1
+            try:
+                geom_names = list(getattr(self.sys, "geom_names", ()))
+                if "apriltag_good_panel" in geom_names:
+                    self._apriltag_good_geom_idx = int(geom_names.index("apriltag_good_panel"))
+                if "apriltag_bad_panel" in geom_names:
+                    self._apriltag_bad_geom_idx = int(geom_names.index("apriltag_bad_panel"))
+            except Exception:
+                self._apriltag_good_geom_idx = -1
+                self._apriltag_bad_geom_idx = -1
+            if self._apriltag_good_geom_idx < 0 or self._apriltag_bad_geom_idx < 0:
+                try:
+                    import mujoco as _mj
+
+                    mj_model = getattr(self.sys, "mj_model", None)
+                    if mj_model is not None and self._apriltag_good_geom_idx < 0:
+                        gid = int(_mj.mj_name2id(mj_model, _mj.mjtObj.mjOBJ_GEOM, "apriltag_good_panel"))
+                        if gid >= 0:
+                            self._apriltag_good_geom_idx = gid
+                    if mj_model is not None and self._apriltag_bad_geom_idx < 0:
+                        gid = int(_mj.mj_name2id(mj_model, _mj.mjtObj.mjOBJ_GEOM, "apriltag_bad_panel"))
+                        if gid >= 0:
+                            self._apriltag_bad_geom_idx = gid
+                except Exception:
+                    pass
+            if self._reward_mode == "apriltag_walls" and self._apriltag_good_geom_idx < 0:
+                print(
+                    "warning: geom 'apriltag_good_panel' not found; "
+                    "AprilTag randomization will affect reward/features but not rendered mesh pose."
+                )
+
+            def _quat_mul_np(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+                aw, ax, ay, az = a
+                bw, bx, by, bz = b
+                return np.array(
+                    [
+                        aw * bw - ax * bx - ay * by - az * bz,
+                        aw * bx + ax * bw + ay * bz - az * by,
+                        aw * by - ax * bz + ay * bw + az * bx,
+                        aw * bz + ax * by - ay * bx + az * bw,
+                    ],
+                    dtype=np.float64,
+                )
+
+            def _quat_to_rot_np(q: np.ndarray) -> np.ndarray:
+                w, x, y, z = q
+                return np.array(
+                    [
+                        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+                        [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+                        [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+                    ],
+                    dtype=np.float64,
+                )
+
+            def _quat_inv_np(q: np.ndarray) -> np.ndarray:
+                q = q.astype(np.float64)
+                return np.array([q[0], -q[1], -q[2], -q[3]], dtype=np.float64) / max(
+                    1e-12, float(np.dot(q, q))
+                )
+
+            def _wall_yaw_from_id_np(wall_id: int) -> float:
+                if int(wall_id) == 0:
+                    return 0.5 * np.pi
+                if int(wall_id) == 1:
+                    return -0.5 * np.pi
+                if int(wall_id) == 2:
+                    return 0.0
+                return np.pi
+
+            self._apriltag_good_rot_by_wall = None
+            self._apriltag_bad_rot_by_wall = None
+            try:
+                mj_model = getattr(self.sys, "mj_model", None)
+                if mj_model is not None and self._apriltag_good_geom_idx >= 0:
+                    base_good_q = np.asarray(mj_model.geom_quat[self._apriltag_good_geom_idx], dtype=np.float64)
+                    good_dataid = int(mj_model.geom_dataid[self._apriltag_good_geom_idx])
+                    mesh_good_q = (
+                        np.asarray(mj_model.mesh_quat[good_dataid], dtype=np.float64)
+                        if good_dataid >= 0
+                        else np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+                    )
+                    good_display_init = _quat_mul_np(base_good_q, mesh_good_q)
+                    q_yaw_wall1_inv = np.array(
+                        [np.cos(0.25 * np.pi), 0.0, 0.0, np.sin(0.25 * np.pi)],
+                        dtype=np.float64,
+                    )
+                    good_display_ref = _quat_mul_np(q_yaw_wall1_inv, good_display_init)
+                    mats = []
+                    for wid in range(4):
+                        yaw = _wall_yaw_from_id_np(wid)
+                        q_yaw = np.array([np.cos(0.5 * yaw), 0.0, 0.0, np.sin(0.5 * yaw)], dtype=np.float64)
+                        q_display = _quat_mul_np(q_yaw, good_display_ref)
+                        q = _quat_mul_np(q_display, _quat_inv_np(mesh_good_q))
+                        q = q / max(1e-12, float(np.linalg.norm(q)))
+                        mats.append(_quat_to_rot_np(q))
+                    self._apriltag_good_rot_by_wall = jp.array(np.stack(mats, axis=0), dtype=self._default_q.dtype)
+                if mj_model is not None and self._apriltag_bad_geom_idx >= 0:
+                    base_bad_q = np.asarray(mj_model.geom_quat[self._apriltag_bad_geom_idx], dtype=np.float64)
+                    bad_dataid = int(mj_model.geom_dataid[self._apriltag_bad_geom_idx])
+                    mesh_bad_q = (
+                        np.asarray(mj_model.mesh_quat[bad_dataid], dtype=np.float64)
+                        if bad_dataid >= 0
+                        else np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+                    )
+                    bad_display_init = _quat_mul_np(base_bad_q, mesh_bad_q)
+                    q_yaw_wall1_inv = np.array(
+                        [np.cos(0.25 * np.pi), 0.0, 0.0, np.sin(0.25 * np.pi)],
+                        dtype=np.float64,
+                    )
+                    bad_display_ref = _quat_mul_np(q_yaw_wall1_inv, bad_display_init)
+                    mats = []
+                    for wid in range(4):
+                        yaw = _wall_yaw_from_id_np(wid)
+                        q_yaw = np.array([np.cos(0.5 * yaw), 0.0, 0.0, np.sin(0.5 * yaw)], dtype=np.float64)
+                        q_display = _quat_mul_np(q_yaw, bad_display_ref)
+                        q = _quat_mul_np(q_display, _quat_inv_np(mesh_bad_q))
+                        q = q / max(1e-12, float(np.linalg.norm(q)))
+                        mats.append(_quat_to_rot_np(q))
+                    self._apriltag_bad_rot_by_wall = jp.array(np.stack(mats, axis=0), dtype=self._default_q.dtype)
+            except Exception:
+                self._apriltag_good_rot_by_wall = None
+                self._apriltag_bad_rot_by_wall = None
 
         def _decode_action(self, action):
             normalized = jp.clip(action, -1.0, 1.0) * self._action_scale
@@ -605,6 +801,191 @@ def _build_env_class():
             offset = jp.array([radius * jp.cos(angle), radius * jp.sin(angle)], dtype=dtype)
             return rng, (base_xy + offset).astype(dtype)
 
+        def _sample_apriltag_wall_goal(self, rng: jp.ndarray, dtype):
+            """Sample one of four room walls and return a tag anchor on that wall."""
+            rng, wkey, lkey = jax.random.split(rng, 3)
+            wall_id = jax.random.randint(wkey, shape=(), minval=0, maxval=4)
+            if self._apriltag_wall_num_slots > 1:
+                slot_idx = jax.random.randint(lkey, shape=(), minval=0, maxval=self._apriltag_wall_num_slots)
+                t = slot_idx.astype(dtype) / jp.asarray(float(self._apriltag_wall_num_slots - 1), dtype=dtype)
+                lateral = jp.asarray(-self._apriltag_wall_span, dtype=dtype) + (
+                    2.0 * jp.asarray(self._apriltag_wall_span, dtype=dtype) * t
+                )
+            else:
+                lateral = jax.random.uniform(
+                    lkey, shape=(), minval=-self._apriltag_wall_span, maxval=self._apriltag_wall_span
+                )
+            off = jp.asarray(self._apriltag_wall_offset, dtype=dtype)
+            x = jp.where(wall_id == 0, lateral, jp.where(wall_id == 1, lateral, jp.where(wall_id == 2, off, -off)))
+            y = jp.where(wall_id == 0, off, jp.where(wall_id == 1, -off, lateral))
+            wall_inward = jp.where(
+                wall_id == 0,
+                jp.array([0.0, -1.0, 0.0], dtype=dtype),
+                jp.where(
+                    wall_id == 1,
+                    jp.array([0.0, 1.0, 0.0], dtype=dtype),
+                    jp.where(
+                        wall_id == 2,
+                        jp.array([-1.0, 0.0, 0.0], dtype=dtype),
+                        jp.array([1.0, 0.0, 0.0], dtype=dtype),
+                    ),
+                ),
+            )
+            goal_xy = jp.array([x, y], dtype=dtype)
+            return rng, goal_xy, wall_id.astype(jp.int32), wall_inward
+
+        def _apriltag_good_goal_xy(self, dtype):
+            return jp.array([-self._apriltag_wall_span, -self._apriltag_wall_offset], dtype=dtype)
+
+        def _apriltag_bad_goal_xy(self, dtype):
+            return jp.array([self._apriltag_wall_span, -self._apriltag_wall_offset], dtype=dtype)
+
+        def _sample_apriltag_good_goal(self, rng: jp.ndarray, dtype: Any):
+            if self._apriltag_randomize_front_wall_only:
+                if self._apriltag_wall_num_slots > 1:
+                    slot_idx = jax.random.randint(rng, shape=(), minval=0, maxval=self._apriltag_wall_num_slots)
+                    t = slot_idx.astype(dtype) / jp.asarray(float(self._apriltag_wall_num_slots - 1), dtype=dtype)
+                    lateral = jp.asarray(-self._apriltag_wall_span, dtype=dtype) + (
+                        2.0 * jp.asarray(self._apriltag_wall_span, dtype=dtype) * t
+                    )
+                else:
+                    lateral = jax.random.uniform(
+                        rng,
+                        shape=(),
+                        minval=-self._apriltag_wall_span,
+                        maxval=self._apriltag_wall_span,
+                    )
+                goal_xy = jp.array([lateral, -self._apriltag_wall_offset], dtype=dtype)
+                # Front wall at negative y, inward normal toward +y.
+                wall_id = jp.asarray(1, dtype=jp.int32)
+                wall_inward = jp.array([0.0, 1.0, 0.0], dtype=dtype)
+                return goal_xy, wall_id, wall_inward
+            _, goal_xy, wall_id, wall_inward = self._sample_apriltag_wall_goal(rng, dtype=dtype)
+            return goal_xy, wall_id, wall_inward
+
+        def _apriltag_xyz(self, goal_xy: Any, dtype: Any):
+            return jp.array([goal_xy[0], goal_xy[1], self._apriltag_height], dtype=dtype)
+
+        def _apriltag_rot_from_inward(self, inward_normal: Any, dtype: Any):
+            # Use user-validated wall->yaw map in compiled mesh frame.
+            nx = inward_normal[0]
+            ny = inward_normal[1]
+            use_y = jp.abs(ny) >= jp.abs(nx)
+            wall_id = jp.where(
+                use_y,
+                jp.where(ny < 0.0, jp.asarray(0, dtype=jp.int32), jp.asarray(1, dtype=jp.int32)),
+                jp.where(nx < 0.0, jp.asarray(2, dtype=jp.int32), jp.asarray(3, dtype=jp.int32)),
+            )
+            if self._apriltag_good_rot_by_wall is not None:
+                return self._apriltag_good_rot_by_wall[wall_id].astype(dtype)
+            # Fallback for safety.
+            z_axis = inward_normal.astype(dtype)
+            z_axis = z_axis / jp.maximum(jp.linalg.norm(z_axis), 1e-6)
+            y_axis = jp.array([0.0, 0.0, -1.0], dtype=dtype)
+            y_axis = y_axis - jp.dot(y_axis, z_axis) * z_axis
+            y_axis = y_axis / jp.maximum(jp.linalg.norm(y_axis), 1e-6)
+            x_axis = jp.cross(y_axis, z_axis)
+            x_axis = x_axis / jp.maximum(jp.linalg.norm(x_axis), 1e-6)
+            return jp.stack([x_axis, y_axis, z_axis], axis=1)
+
+        def _apply_apriltag_geom_pose(
+            self,
+            pipeline_state: Any,
+            good_goal_xy: Any,
+            good_wall_normal: Any,
+            dtype: Any,
+        ):
+            if not hasattr(pipeline_state, "geom_xpos") or not hasattr(pipeline_state, "geom_xmat"):
+                return pipeline_state
+
+            geom_xpos = pipeline_state.geom_xpos
+            geom_xmat = pipeline_state.geom_xmat
+
+            if self._apriltag_good_geom_idx >= 0:
+                good_pos = self._apriltag_xyz(good_goal_xy.astype(dtype), dtype=dtype)
+                good_rot = self._apriltag_rot_from_inward(good_wall_normal.astype(dtype), dtype=dtype)
+                geom_xpos = geom_xpos.at[self._apriltag_good_geom_idx].set(good_pos)
+                geom_xmat = geom_xmat.at[self._apriltag_good_geom_idx].set(good_rot)
+
+            if self._apriltag_bad_geom_idx >= 0:
+                bad_xy = self._apriltag_bad_goal_xy(dtype=dtype)
+                bad_pos = self._apriltag_xyz(bad_xy, dtype=dtype)
+                if self._apriltag_bad_rot_by_wall is not None:
+                    # wall_id=1 => -Y wall in sampling convention.
+                    bad_rot = self._apriltag_bad_rot_by_wall[jp.asarray(1, dtype=jp.int32)].astype(dtype)
+                else:
+                    bad_rot = self._apriltag_rot_from_inward(jp.array([0.0, 1.0, 0.0], dtype=dtype), dtype=dtype)
+                geom_xpos = geom_xpos.at[self._apriltag_bad_geom_idx].set(bad_pos)
+                geom_xmat = geom_xmat.at[self._apriltag_bad_geom_idx].set(bad_rot)
+
+            return pipeline_state.replace(geom_xpos=geom_xpos, geom_xmat=geom_xmat)
+
+        def _deactivate_apriltag_geom_pose(self, pipeline_state: Any, dtype: Any):
+            if not hasattr(pipeline_state, "geom_xpos") or not hasattr(pipeline_state, "geom_xmat"):
+                return pipeline_state
+
+            geom_xpos = pipeline_state.geom_xpos
+            geom_xmat = pipeline_state.geom_xmat
+            inactive_pos = self._apriltag_inactive_pose_xyz.astype(dtype)
+            identity = jp.eye(3, dtype=dtype)
+
+            if self._apriltag_good_geom_idx >= 0:
+                geom_xpos = geom_xpos.at[self._apriltag_good_geom_idx].set(inactive_pos)
+                geom_xmat = geom_xmat.at[self._apriltag_good_geom_idx].set(identity)
+            if self._apriltag_bad_geom_idx >= 0:
+                geom_xpos = geom_xpos.at[self._apriltag_bad_geom_idx].set(inactive_pos)
+                geom_xmat = geom_xmat.at[self._apriltag_bad_geom_idx].set(identity)
+
+            return pipeline_state.replace(geom_xpos=geom_xpos, geom_xmat=geom_xmat)
+
+        def _apriltag_camera_features(self, pipeline_state: Any, goal_xy: Any, dtype: Any):
+            """Analytical camera projection features for the active AprilTag."""
+            base_pos = pipeline_state.x.pos[self._torso_idx].astype(dtype)
+            base_rot = pipeline_state.x.rot[self._torso_idx].astype(dtype)
+            cam_pos = base_pos + math.rotate(self._front_camera_offset_in_body.astype(dtype), base_rot)
+            cam_fwd = math.rotate(self._front_camera_forward_in_body.astype(dtype), base_rot)
+            cam_up = math.rotate(self._front_camera_up_in_body.astype(dtype), base_rot)
+            cam_fwd = cam_fwd / jp.maximum(jp.linalg.norm(cam_fwd), 1e-6)
+            cam_up = cam_up / jp.maximum(jp.linalg.norm(cam_up), 1e-6)
+            cam_right = jp.cross(cam_fwd, cam_up)
+            cam_right = cam_right / jp.maximum(jp.linalg.norm(cam_right), 1e-6)
+
+            tag_pos = self._apriltag_xyz(goal_xy=goal_xy.astype(dtype), dtype=dtype)
+            rel = tag_pos - cam_pos
+            dist = jp.maximum(jp.linalg.norm(rel), 1e-6)
+            rel_dir = rel / dist
+
+            z_cam = jp.dot(rel_dir, cam_fwd)
+            x_cam = jp.dot(rel_dir, cam_right)
+            y_cam = jp.dot(rel_dir, cam_up)
+            tan_half = jp.asarray(self._camera_obs_tan_half_fov, dtype=dtype)
+            inv_z = 1.0 / jp.maximum(z_cam, 1e-4)
+            u = x_cam * inv_z / jp.maximum(tan_half, 1e-6)
+            v = y_cam * inv_z / jp.maximum(tan_half, 1e-6)
+            u = jp.clip(u, -1.0, 1.0)
+            v = jp.clip(v, -1.0, 1.0)
+            if self._camera_obs_uv_bins > 1:
+                bins = jp.asarray(float(self._camera_obs_uv_bins), dtype=dtype)
+                step = 2.0 / jp.maximum(bins - 1.0, 1.0)
+                u = jp.round((u + 1.0) / step) * step - 1.0
+                v = jp.round((v + 1.0) / step) * step - 1.0
+                u = jp.clip(u, -1.0, 1.0)
+                v = jp.clip(v, -1.0, 1.0)
+            within = (jp.abs(u) <= 1.0) & (jp.abs(v) <= 1.0)
+            visible = ((z_cam > 0.0) & within).astype(dtype)
+            centering = jp.maximum(0.0, 1.0 - jp.sqrt(jp.minimum(1.0, u * u + v * v)))
+            dist_norm = 1.0 / (1.0 + dist / jp.asarray(self._camera_obs_distance_scale, dtype=dtype))
+
+            return {
+                "visible": visible,
+                "forward_cos": z_cam,
+                "u": u,
+                "v": v,
+                "centering": centering,
+                "distance": dist,
+                "distance_norm": dist_norm,
+            }
+
         def _wrap_angle(self, angle: Any):
             return jp.arctan2(jp.sin(angle), jp.cos(angle))
 
@@ -640,6 +1021,79 @@ def _build_env_class():
             return command
 
         def _get_obs(self, pipeline_state, command=None, goal_xy=None) -> jp.ndarray:
+            if self._high_level_obs_mode == "camera":
+                if goal_xy is None:
+                    if self._reward_mode == "apriltag_walls":
+                        camera_obs = jp.zeros((12,), dtype=pipeline_state.q.dtype)
+                        if not self._apriltag_use_bad_tag:
+                            camera_obs = camera_obs[:6]
+                    else:
+                        camera_obs = jp.zeros((6,), dtype=pipeline_state.q.dtype)
+                else:
+                    if self._reward_mode == "apriltag_walls":
+                        good_feats = self._apriltag_camera_features(
+                            pipeline_state=pipeline_state,
+                            goal_xy=goal_xy.astype(pipeline_state.q.dtype),
+                            dtype=pipeline_state.q.dtype,
+                        )
+                        if self._apriltag_use_bad_tag:
+                            bad_feats = self._apriltag_camera_features(
+                                pipeline_state=pipeline_state,
+                                goal_xy=self._apriltag_bad_goal_xy(dtype=pipeline_state.q.dtype),
+                                dtype=pipeline_state.q.dtype,
+                            )
+                            camera_obs = jp.array(
+                                [
+                                    good_feats["visible"],
+                                    good_feats["u"],
+                                    good_feats["v"],
+                                    good_feats["forward_cos"],
+                                    good_feats["centering"],
+                                    good_feats["distance_norm"],
+                                    bad_feats["visible"],
+                                    bad_feats["u"],
+                                    bad_feats["v"],
+                                    bad_feats["forward_cos"],
+                                    bad_feats["centering"],
+                                    bad_feats["distance_norm"],
+                                ],
+                                dtype=pipeline_state.q.dtype,
+                            )
+                        else:
+                            camera_obs = jp.array(
+                                [
+                                    good_feats["visible"],
+                                    good_feats["u"],
+                                    good_feats["v"],
+                                    good_feats["forward_cos"],
+                                    good_feats["centering"],
+                                    good_feats["distance_norm"],
+                                ],
+                                dtype=pipeline_state.q.dtype,
+                            )
+                    else:
+                        feats = self._apriltag_camera_features(
+                            pipeline_state=pipeline_state,
+                            goal_xy=goal_xy,
+                            dtype=pipeline_state.q.dtype,
+                        )
+                        camera_obs = jp.array(
+                            [
+                                feats["visible"],
+                                feats["u"],
+                                feats["v"],
+                                feats["forward_cos"],
+                                feats["centering"],
+                                feats["distance_norm"],
+                            ],
+                            dtype=pipeline_state.q.dtype,
+                        )
+                if self._reward_requires_command and self._include_command_in_obs:
+                    if command is None:
+                        command = jp.zeros((3,), dtype=camera_obs.dtype)
+                    camera_obs = jp.concatenate([camera_obs, command.astype(camera_obs.dtype)], axis=0)
+                return camera_obs
+
             q = pipeline_state.q
             qd = pipeline_state.qd
             if self._exclude_xy_from_obs and q.shape[0] > 2:
@@ -664,6 +1118,8 @@ def _build_env_class():
 
         def _apply_obs_noise(self, obs: jp.ndarray, rng: jp.ndarray) -> jp.ndarray:
             """Applies sensor-like noise to obs vector."""
+            if self._high_level_obs_mode == "camera":
+                return obs
             q_size = int(self.sys.q_size()) - (2 if self._exclude_xy_from_obs else 0)
             qd_size = int(self.sys.qd_size())
             out = obs
@@ -731,9 +1187,50 @@ def _build_env_class():
                 rng, command = self._sample_command(rng, q.dtype)
 
             base_xy = pipeline_state.x.pos[self._torso_idx][:2].astype(q.dtype)
-            rng, goal_xy = self._sample_goal(goal_key, base_xy=base_xy, dtype=q.dtype)
+            apriltag_wall_id = jp.asarray(-1, dtype=jp.int32)
+            apriltag_wall_normal = jp.array([0.0, 0.0, 0.0], dtype=q.dtype)
+            if self._reward_mode == "apriltag_walls":
+                if self._apriltag_randomize_good_goal_on_reset:
+                    goal_xy, apriltag_wall_id, apriltag_wall_normal = self._sample_apriltag_good_goal(
+                        goal_key, dtype=q.dtype
+                    )
+                else:
+                    goal_xy = self._apriltag_good_goal_xy(dtype=q.dtype)
+                    apriltag_wall_id = jp.asarray(1, dtype=jp.int32)
+                    apriltag_wall_normal = jp.array([0.0, 1.0, 0.0], dtype=q.dtype)
+            else:
+                rng, goal_xy = self._sample_goal(goal_key, base_xy=base_xy, dtype=q.dtype)
+            if self._reward_mode == "apriltag_walls":
+                pipeline_state = self._apply_apriltag_geom_pose(
+                    pipeline_state=pipeline_state,
+                    good_goal_xy=goal_xy.astype(q.dtype),
+                    good_wall_normal=apriltag_wall_normal.astype(q.dtype),
+                    dtype=q.dtype,
+                )
             goal_delta = goal_xy - base_xy
             goal_distance = self._goal_distance_to_robot(pipeline_state, goal_xy.astype(q.dtype))
+            apriltag_features = self._apriltag_camera_features(
+                pipeline_state=pipeline_state,
+                goal_xy=goal_xy.astype(q.dtype),
+                dtype=q.dtype,
+            )
+            if self._apriltag_use_bad_tag:
+                apriltag_bad_features = self._apriltag_camera_features(
+                    pipeline_state=pipeline_state,
+                    goal_xy=self._apriltag_bad_goal_xy(dtype=q.dtype),
+                    dtype=q.dtype,
+                )
+            else:
+                z = jp.asarray(0.0, dtype=q.dtype)
+                apriltag_bad_features = {
+                    "visible": z,
+                    "forward_cos": z,
+                    "u": z,
+                    "v": z,
+                    "centering": z,
+                    "distance": z,
+                    "distance_norm": z,
+                }
 
             ll_hist = jp.zeros((1, 1), dtype=q.dtype)
             if self._use_nav_controller:
@@ -787,8 +1284,25 @@ def _build_env_class():
                 "goal_reached_current": zero,
                 "goal_resampled": zero,
                 "goals_collected": zero,
+                "collect_streak": zero,
                 "tracking_lin_error": zero,
                 "tracking_yaw_error": zero,
+                "apriltag_visible": apriltag_features["visible"],
+                "apriltag_forward_cos": apriltag_features["forward_cos"],
+                "apriltag_u": apriltag_features["u"],
+                "apriltag_v": apriltag_features["v"],
+                "apriltag_centering": apriltag_features["centering"],
+                "apriltag_distance": apriltag_features["distance"],
+                "apriltag_distance_norm": apriltag_features["distance_norm"],
+                "apriltag_bad_visible": apriltag_bad_features["visible"],
+                "apriltag_bad_forward_cos": apriltag_bad_features["forward_cos"],
+                "apriltag_bad_u": apriltag_bad_features["u"],
+                "apriltag_bad_v": apriltag_bad_features["v"],
+                "apriltag_bad_centering": apriltag_bad_features["centering"],
+                "apriltag_bad_distance": apriltag_bad_features["distance"],
+                "apriltag_bad_distance_norm": apriltag_bad_features["distance_norm"],
+                "apriltag_wall_id": apriltag_wall_id.astype(q.dtype),
+                "apriltag_active": jp.asarray(1.0, dtype=q.dtype),
             }
             info = {
                 "last_action": jp.zeros((self._act_size,), dtype=obs.dtype),
@@ -800,8 +1314,14 @@ def _build_env_class():
                 "goal_position": goal_xy.astype(obs.dtype),
                 "goal_distance_prev": goal_distance.astype(obs.dtype),
                 "goals_collected": zero.astype(obs.dtype),
+                "collect_streak": zero.astype(obs.dtype),
+                "apriltag_wall_id": apriltag_wall_id,
+                "apriltag_wall_normal": apriltag_wall_normal.astype(obs.dtype),
+                "apriltag_active": jp.asarray(1.0, dtype=obs.dtype),
                 "obs_history": obs_history,
                 "ll_obs_history": ll_hist,
+                "hl_last_policy_action": jp.zeros((3,), dtype=obs.dtype),
+                "hl_hold_counter": jp.asarray(0, dtype=jp.int32),
                 "last_joint_vel": jp.zeros((self._act_size,), dtype=obs.dtype),
                 "foot_air_time": jp.zeros((len(self._foot_body_indices),), dtype=obs.dtype),
                 "prev_foot_contact": jp.zeros((len(self._foot_body_indices),), dtype=jp.bool_),
@@ -811,6 +1331,8 @@ def _build_env_class():
         def step(self, state: State, action: jp.ndarray) -> State:
             policy_action = action
             command = state.info.get("command", jp.zeros((3,), dtype=policy_action.dtype))
+            hl_last_policy_action = state.info.get("hl_last_policy_action", jp.zeros((3,), dtype=policy_action.dtype))
+            hl_hold_counter = state.info.get("hl_hold_counter", jp.asarray(0, dtype=jp.int32))
             if self._use_low_level_policy:
                 goal_xy = state.info.get(
                     "goal_position",
@@ -820,8 +1342,17 @@ def _build_env_class():
                     command = self._compute_nav_controller_command(
                         pipeline_state=state.pipeline_state, goal_xy=goal_xy.astype(policy_action.dtype), dtype=policy_action.dtype
                     )
+                    hl_last_policy_action = jp.zeros_like(policy_action)
+                    hl_hold_counter = jp.asarray(0, dtype=jp.int32)
                 else:
-                    command = self._decode_command_action(policy_action, dtype=policy_action.dtype)
+                    should_update_hl = hl_hold_counter <= 0
+                    hl_last_policy_action = jp.where(should_update_hl, policy_action, hl_last_policy_action)
+                    command = self._decode_command_action(hl_last_policy_action, dtype=policy_action.dtype)
+                    hl_hold_counter = jp.where(
+                        should_update_hl,
+                        jp.asarray(self._high_level_hold_steps - 1, dtype=jp.int32),
+                        hl_hold_counter - 1,
+                    )
                 ll_base_obs = self._build_low_level_base_obs(state.pipeline_state, command=command)
                 prev_ll_hist = state.info.get(
                     "ll_obs_history", jp.tile(ll_base_obs[None, :], (self._low_level_obs_history, 1))
@@ -888,6 +1419,43 @@ def _build_env_class():
                 "goal_position",
                 jp.zeros((2,), dtype=action.dtype),
             )
+            apriltag_wall_id = state.info.get("apriltag_wall_id", jp.asarray(-1, dtype=jp.int32))
+            apriltag_wall_normal = state.info.get(
+                "apriltag_wall_normal",
+                jp.array([0.0, 0.0, 0.0], dtype=action.dtype),
+            )
+            if self._reward_mode == "apriltag_walls":
+                pipeline_state = self._apply_apriltag_geom_pose(
+                    pipeline_state=pipeline_state,
+                    good_goal_xy=goal_xy.astype(action.dtype),
+                    good_wall_normal=apriltag_wall_normal.astype(action.dtype),
+                    dtype=action.dtype,
+                )
+            apriltag_features = self._apriltag_camera_features(
+                pipeline_state=pipeline_state,
+                goal_xy=goal_xy.astype(action.dtype),
+                dtype=action.dtype,
+            )
+            if self._apriltag_use_bad_tag:
+                apriltag_bad_features = self._apriltag_camera_features(
+                    pipeline_state=pipeline_state,
+                    goal_xy=self._apriltag_bad_goal_xy(dtype=action.dtype),
+                    dtype=action.dtype,
+                )
+            else:
+                z = jp.asarray(0.0, dtype=action.dtype)
+                apriltag_bad_features = {
+                    "visible": z,
+                    "forward_cos": z,
+                    "u": z,
+                    "v": z,
+                    "centering": z,
+                    "distance_norm": z,
+                }
+            apriltag_active_prev = state.info.get("apriltag_active", jp.asarray(1.0, dtype=action.dtype))
+            if self._reward_mode == "apriltag_walls":
+                apriltag_features = {k: v * apriltag_active_prev.astype(v.dtype) for k, v in apriltag_features.items()}
+                apriltag_bad_features = {k: v * apriltag_active_prev.astype(v.dtype) for k, v in apriltag_bad_features.items()}
 
             motor_velocities = None
             if hasattr(pipeline_state, "qd"):
@@ -963,6 +1531,16 @@ def _build_env_class():
                 "episode_step": episode_step,
                 "goal_position": goal_xy,
                 "goal_distance_override": self._goal_distance_to_robot(pipeline_state, goal_xy.astype(action.dtype)),
+                "goal_distance_prev": state.info.get("goal_distance_prev", jp.asarray(0.0, dtype=action.dtype)),
+                "collect_streak_prev": state.info.get("collect_streak", jp.asarray(0.0, dtype=action.dtype)),
+                "apriltag_visible": apriltag_features["visible"],
+                "apriltag_forward_cos": apriltag_features["forward_cos"],
+                "apriltag_centering": apriltag_features["centering"],
+                "apriltag_distance_norm": apriltag_features["distance_norm"],
+                "apriltag_bad_visible": apriltag_bad_features["visible"],
+                "apriltag_bad_forward_cos": apriltag_bad_features["forward_cos"],
+                "apriltag_bad_centering": apriltag_bad_features["centering"],
+                "apriltag_bad_distance_norm": apriltag_bad_features["distance_norm"],
             }
             reward, reward_terms = self._reward_fn(reward_ctx)
             task_reward = reward_terms.get("task_reward", reward)
@@ -989,6 +1567,10 @@ def _build_env_class():
             goal_distance = self._goal_distance_to_robot(pipeline_state, goal_xy.astype(reward.dtype))
             goal_reached = (goal_distance <= self._goal_reach_tolerance).astype(reward.dtype)
             goal_reached_event = reward_terms.get("goal_reached", goal_reached)
+            if self._reward_mode == "apriltag_walls":
+                goal_reached = goal_reached * apriltag_active_prev.astype(reward.dtype)
+                goal_reached_event = goal_reached_event * apriltag_active_prev.astype(reward.dtype)
+            collect_streak = reward_terms.get("collect_streak", state.info.get("collect_streak", jp.asarray(0.0, dtype=reward.dtype)))
             goals_collected = state.info.get("goals_collected", jp.asarray(0.0, dtype=reward.dtype))
             goals_collected = goals_collected + goal_reached_event.astype(reward.dtype)
             goal_resampled = jp.asarray(0.0, dtype=reward.dtype)
@@ -1004,6 +1586,49 @@ def _build_env_class():
                 goal_delta = goal_xy.astype(reward.dtype) - base_xy
                 goal_distance = self._goal_distance_to_robot(pipeline_state, goal_xy.astype(reward.dtype))
                 goal_reached = (goal_distance <= self._goal_reach_tolerance).astype(reward.dtype)
+            if self._reward_mode == "apriltag_walls":
+                goal_resampled = jp.asarray(0.0, dtype=reward.dtype)
+                tag_collected_now = goal_reached_event > 0.5
+                apriltag_active = jp.where(tag_collected_now, jp.asarray(0.0, dtype=reward.dtype), apriltag_active_prev.astype(reward.dtype))
+                if self._apriltag_deactivate_on_collect:
+                    inactive_xy = self._apriltag_inactive_pose_xyz[:2].astype(reward.dtype)
+                    goal_xy = jp.where(apriltag_active > 0.5, goal_xy, inactive_xy)
+                    pipeline_state = jax.lax.cond(
+                        apriltag_active > 0.5,
+                        lambda ps: ps,
+                        lambda ps: self._deactivate_apriltag_geom_pose(ps, dtype=reward.dtype),
+                        pipeline_state,
+                    )
+                if self._apriltag_end_episode_on_collect:
+                    done = jp.maximum(done, tag_collected_now.astype(done.dtype))
+                goal_delta = goal_xy.astype(reward.dtype) - base_xy
+                goal_distance = self._goal_distance_to_robot(pipeline_state, goal_xy.astype(reward.dtype))
+                goal_reached = (goal_distance <= self._goal_reach_tolerance).astype(reward.dtype)
+            else:
+                apriltag_active = apriltag_active_prev.astype(reward.dtype)
+
+            apriltag_features = self._apriltag_camera_features(
+                pipeline_state=pipeline_state,
+                goal_xy=goal_xy.astype(reward.dtype),
+                dtype=reward.dtype,
+            )
+            if self._apriltag_use_bad_tag:
+                apriltag_bad_features = self._apriltag_camera_features(
+                    pipeline_state=pipeline_state,
+                    goal_xy=self._apriltag_bad_goal_xy(dtype=reward.dtype),
+                    dtype=reward.dtype,
+                )
+            else:
+                z = jp.asarray(0.0, dtype=reward.dtype)
+                apriltag_bad_features = {
+                    "visible": z,
+                    "forward_cos": z,
+                    "u": z,
+                    "v": z,
+                    "centering": z,
+                    "distance": z,
+                    "distance_norm": z,
+                }
 
             base_vel_world = pipeline_state.xd.vel[self._torso_idx]
             base_ang_world = pipeline_state.xd.ang[self._torso_idx]
@@ -1051,8 +1676,25 @@ def _build_env_class():
                 goal_reached_current=goal_reached,
                 goal_resampled=goal_resampled,
                 goals_collected=goals_collected,
+                collect_streak=collect_streak,
                 tracking_lin_error=tracking_lin_error,
                 tracking_yaw_error=tracking_yaw_error,
+                apriltag_visible=apriltag_features["visible"],
+                apriltag_forward_cos=apriltag_features["forward_cos"],
+                apriltag_u=apriltag_features["u"],
+                apriltag_v=apriltag_features["v"],
+                apriltag_centering=apriltag_features["centering"],
+                apriltag_distance=apriltag_features["distance"],
+                apriltag_distance_norm=apriltag_features["distance_norm"],
+                apriltag_bad_visible=apriltag_bad_features["visible"],
+                apriltag_bad_forward_cos=apriltag_bad_features["forward_cos"],
+                apriltag_bad_u=apriltag_bad_features["u"],
+                apriltag_bad_v=apriltag_bad_features["v"],
+                apriltag_bad_centering=apriltag_bad_features["centering"],
+                apriltag_bad_distance=apriltag_bad_features["distance"],
+                apriltag_bad_distance_norm=apriltag_bad_features["distance_norm"],
+                apriltag_wall_id=apriltag_wall_id.astype(reward.dtype),
+                apriltag_active=apriltag_active,
             )
             if "tracking_lin_vel" in reward_terms:
                 metrics["reward_tracking_lin_vel"] = reward_terms["tracking_lin_vel"]
@@ -1073,7 +1715,13 @@ def _build_env_class():
             info["goal_position"] = goal_xy
             info["goal_distance_prev"] = goal_distance
             info["goals_collected"] = goals_collected
+            info["collect_streak"] = collect_streak
+            info["apriltag_wall_id"] = apriltag_wall_id
+            info["apriltag_wall_normal"] = apriltag_wall_normal
+            info["apriltag_active"] = apriltag_active
             info["obs_history"] = new_hist
+            info["hl_last_policy_action"] = hl_last_policy_action
+            info["hl_hold_counter"] = hl_hold_counter
             if self._use_low_level_policy:
                 ll_base_obs_new = self._build_low_level_base_obs(pipeline_state, command=command)
                 prev_ll_hist = state.info.get(

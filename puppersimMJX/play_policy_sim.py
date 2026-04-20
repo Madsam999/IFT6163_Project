@@ -13,7 +13,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import mujoco as mj
 import numpy as np
@@ -58,6 +58,25 @@ def _clip_command(cmd: np.ndarray, xr: Tuple[float, float], yr: Tuple[float, flo
     return out
 
 
+def _create_apriltag_detector(family: str):
+    if cv2 is None or not hasattr(cv2, "aruco"):
+        return None
+    fam = str(family).strip().lower()
+    mapping = {
+        "tag16h5": "DICT_APRILTAG_16h5",
+        "tag25h9": "DICT_APRILTAG_25h9",
+        "tag36h10": "DICT_APRILTAG_36h10",
+        "tag36h11": "DICT_APRILTAG_36h11",
+    }
+    dict_name = mapping.get(fam, "DICT_APRILTAG_36h11")
+    dict_id = getattr(cv2.aruco, dict_name, None)
+    if dict_id is None:
+        return None
+    dictionary = cv2.aruco.getPredefinedDictionary(dict_id)
+    params = cv2.aruco.DetectorParameters()
+    return cv2.aruco.ArucoDetector(dictionary, params)
+
+
 def _mouse_button(window, button, act, mods) -> None:
     del button, act, mods
     global _button_left, _button_middle, _button_right
@@ -94,18 +113,12 @@ def _scroll(window, xoffset, yoffset, model, scene, cam) -> None:
     mj.mjv_moveCamera(model, mj.mjtMouse.mjMOUSE_ZOOM, 0.0, -0.05 * yoffset, scene, cam)
 
 
-def _key_callback(window, key, scancode, act, mods, model, data, cmd) -> None:
+def _key_callback(window, key, scancode, act, mods, model, data, cmd, reset_flag) -> None:
     del window, scancode, mods
     if act != glfw.PRESS:
         return
     if key == glfw.KEY_BACKSPACE or key == glfw.KEY_R:
-        mj.mj_resetData(model, data)
-        if model.nkey > 0:
-            try:
-                mj.mj_resetDataKeyframe(model, data, 0)
-            except Exception:
-                pass
-        mj.mj_forward(model, data)
+        reset_flag[0] = True
         cmd[:] = 0.0
 
 
@@ -129,6 +142,135 @@ def _sample_goal_xy(rng: np.random.Generator, base_xy: np.ndarray, r_min: float,
     return np.array([base_xy[0] + radius * np.cos(angle), base_xy[1] + radius * np.sin(angle)], dtype=np.float64)
 
 
+def _sample_lateral(rng: np.random.Generator, span: float, num_slots: int) -> float:
+    if int(num_slots) > 1:
+        slot = int(rng.integers(0, int(num_slots)))
+        t = float(slot) / float(int(num_slots) - 1)
+        return float(-span + (2.0 * span * t))
+    return float(rng.uniform(-span, span))
+
+
+def _sample_apriltag_goal_xy(
+    rng: np.random.Generator,
+    wall_offset: float,
+    wall_span: float,
+    front_wall_only: bool,
+    wall_num_slots: int,
+) -> Tuple[np.ndarray, int, np.ndarray]:
+    lateral = _sample_lateral(rng, span=float(wall_span), num_slots=int(wall_num_slots))
+    if bool(front_wall_only):
+        return np.array([lateral, -wall_offset], dtype=np.float64), 1, np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    wall_id = int(rng.integers(0, 4))
+    if wall_id == 0:
+        return np.array([lateral, wall_offset], dtype=np.float64), 0, np.array([0.0, -1.0, 0.0], dtype=np.float64)
+    if wall_id == 1:
+        return np.array([lateral, -wall_offset], dtype=np.float64), 1, np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    if wall_id == 2:
+        return np.array([wall_offset, lateral], dtype=np.float64), 2, np.array([-1.0, 0.0, 0.0], dtype=np.float64)
+    return np.array([-wall_offset, lateral], dtype=np.float64), 3, np.array([1.0, 0.0, 0.0], dtype=np.float64)
+
+
+def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return np.array(
+        [
+            aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+        ],
+        dtype=np.float64,
+    )
+
+
+def _quat_inv(q: np.ndarray) -> np.ndarray:
+    q = q.astype(np.float64)
+    return np.array([q[0], -q[1], -q[2], -q[3]], dtype=np.float64) / max(1e-12, float(np.dot(q, q)))
+
+
+def _wall_yaw_from_id(wall_id: int) -> float:
+    # User-validated mapping in compiled mesh frame.
+    # wall_id: 0 (+Y wall), 1 (-Y wall), 2 (+X wall), 3 (-X wall)
+    if int(wall_id) == 0:
+        return 0.5 * np.pi
+    if int(wall_id) == 1:
+        return -0.5 * np.pi
+    if int(wall_id) == 2:
+        return 0.0
+    return np.pi
+
+
+def _quat_from_wall_id(wall_id: int, display_ref_quat_wxyz: np.ndarray, mesh_quat_wxyz: np.ndarray) -> np.ndarray:
+    yaw = _wall_yaw_from_id(int(wall_id))
+    q_yaw = np.array([np.cos(0.5 * yaw), 0.0, 0.0, np.sin(0.5 * yaw)], dtype=np.float64)
+    # q_display(wall) = yaw(wall) * q_display_ref, then q_geom = q_display * inv(q_mesh).
+    q_display = _quat_mul(q_yaw, display_ref_quat_wxyz.astype(np.float64))
+    q = _quat_mul(q_display, _quat_inv(mesh_quat_wxyz.astype(np.float64)))
+    q /= max(1e-12, float(np.linalg.norm(q)))
+    return q
+
+
+def _apply_apriltag_pose(
+    model: mj.MjModel,
+    data: mj.MjData,
+    good_geom_id: int,
+    bad_geom_id: int,
+    good_display_ref_quat: np.ndarray,
+    bad_display_ref_quat: np.ndarray,
+    good_mesh_quat: np.ndarray,
+    bad_mesh_quat: np.ndarray,
+    use_bad_tag: bool,
+    good_wall_id: int,
+    good_xy: np.ndarray,
+    tag_height: float,
+    wall_offset: float,
+    wall_span: float,
+    wall_surface_inset: float,
+    wall_inner_pos: Optional[Dict[int, float]],
+) -> None:
+    gx = float(good_xy[0])
+    gy = float(good_xy[1])
+    if wall_inner_pos is not None:
+        if int(good_wall_id) == 0:
+            gy = float(wall_inner_pos[0] - wall_surface_inset)
+        elif int(good_wall_id) == 1:
+            gy = float(wall_inner_pos[1] + wall_surface_inset)
+        elif int(good_wall_id) == 2:
+            gx = float(wall_inner_pos[2] - wall_surface_inset)
+        else:
+            gx = float(wall_inner_pos[3] + wall_surface_inset)
+    if good_geom_id >= 0:
+        model.geom_pos[good_geom_id, 0] = gx
+        model.geom_pos[good_geom_id, 1] = gy
+        model.geom_pos[good_geom_id, 2] = float(tag_height)
+        model.geom_rgba[good_geom_id, 3] = 1.0
+        model.geom_quat[good_geom_id, :] = _quat_from_wall_id(
+            int(good_wall_id), good_display_ref_quat, good_mesh_quat
+        )
+    if bad_geom_id >= 0:
+        if use_bad_tag:
+            bx = float(wall_span)
+            by = float(-wall_offset)
+            if wall_inner_pos is not None:
+                by = float(wall_inner_pos[1] + wall_surface_inset)
+            model.geom_pos[bad_geom_id, 0] = bx
+            model.geom_pos[bad_geom_id, 1] = by
+            model.geom_pos[bad_geom_id, 2] = float(tag_height)
+            model.geom_quat[bad_geom_id, :] = _quat_from_wall_id(1, bad_display_ref_quat, bad_mesh_quat)
+            model.geom_rgba[bad_geom_id, 3] = 1.0
+        else:
+            model.geom_rgba[bad_geom_id, 3] = 0.0
+    mj.mj_forward(model, data)
+
+
+def _geom_normal_from_quat_wxyz(quat_wxyz: np.ndarray) -> np.ndarray:
+    m = np.zeros(9, dtype=np.float64)
+    mj.mju_quat2Mat(m, quat_wxyz.astype(np.float64))
+    r = m.reshape(3, 3)
+    return (r @ np.array([0.0, 0.0, 1.0], dtype=np.float64)).astype(np.float64)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--xml-path", type=Path, default=Path("puppersim/data/pupper_v2_final_stable_cam_goal.xml"))
@@ -137,12 +279,46 @@ def main() -> None:
     parser.add_argument("--print-camera-config", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--inset-scale", type=float, default=0.40)
     parser.add_argument("--show-grayscale", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--detect-apriltag", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--apriltag-family", type=str, default="tag36h11")
+    parser.add_argument(
+        "--opencv-input-width",
+        type=int,
+        default=0,
+        help="If >0 with --opencv-input-height, resize camera frame to this width before OpenCV AprilTag detection.",
+    )
+    parser.add_argument(
+        "--opencv-input-height",
+        type=int,
+        default=0,
+        help="If >0 with --opencv-input-width, resize camera frame to this height before OpenCV AprilTag detection.",
+    )
+    parser.add_argument("--good-tag-id", type=int, default=101)
+    parser.add_argument("--bad-tag-id", type=int, default=287)
     parser.add_argument("--goal-site-name", type=str, default="goal_marker")
     parser.add_argument("--goal-z", type=float, default=0.02)
     parser.add_argument("--goal-radius-min", type=float, default=0.8)
     parser.add_argument("--goal-radius-max", type=float, default=2.5)
     parser.add_argument("--goal-tolerance", type=float, default=0.25)
     parser.add_argument("--goal-seed", type=int, default=0)
+    parser.add_argument("--tag-randomize-on-reset", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--tag-randomize-front-wall-only", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--tag-wall-offset", type=float, default=1.95)
+    parser.add_argument("--tag-wall-span", type=float, default=0.8)
+    parser.add_argument("--tag-height", type=float, default=0.45)
+    parser.add_argument("--tag-wall-num-slots", type=int, default=0)
+    parser.add_argument("--tag-seed", type=int, default=0)
+    parser.add_argument("--tag-collect-radius", type=float, default=0.35)
+    parser.add_argument("--tag-deactivate-on-collect", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--tag-end-episode-on-collect", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--tag-inactive-x",
+        type=float,
+        default=1000.0,
+        help="X position used when teleporting collected tag out of scene.",
+    )
+    parser.add_argument("--tag-inactive-y", type=float, default=1000.0)
+    parser.add_argument("--tag-inactive-z", type=float, default=-1000.0)
 
     parser.add_argument("--bundle-dir", type=Path, default=None)
     parser.add_argument(
@@ -173,6 +349,7 @@ def main() -> None:
             pass
     mj.mj_forward(model, data)
 
+    env_cfg = _parse_env_kwargs(args.env_kwargs)
     # Optional policy setup.
     bundle = None
     cmd = np.zeros(3, dtype=np.float32)
@@ -186,7 +363,6 @@ def main() -> None:
     action_half = 0.5 * (high - low)
     if args.bundle_dir is not None:
         bundle = BraxPolicyBundle(args.bundle_dir)
-        env_cfg = _parse_env_kwargs(args.env_kwargs)
         include_command = bool(env_cfg.get("include_command_in_obs", True))
         exclude_xy = bool(env_cfg.get("exclude_xy_from_obs", True))
         obs_hist_len = int(max(1, env_cfg.get("observation_history", 20)))
@@ -204,6 +380,14 @@ def main() -> None:
         high = high[:act_dim]
         action_mid = action_mid[:act_dim]
         action_half = action_half[:act_dim]
+    tag_detector = _create_apriltag_detector(args.apriltag_family) if bool(args.detect_apriltag) else None
+    if bool(args.detect_apriltag) and tag_detector is None:
+        print("warning: AprilTag detection unavailable (opencv-contrib missing or family unsupported).")
+    cv_input_w = int(args.opencv_input_width)
+    cv_input_h = int(args.opencv_input_height)
+    use_cv_resize = cv_input_w > 0 and cv_input_h > 0
+    if use_cv_resize:
+        print(f"info: OpenCV detector input resized to {cv_input_w}x{cv_input_h}")
 
     if not glfw.init():
         raise RuntimeError("glfw.init() failed")
@@ -221,7 +405,8 @@ def main() -> None:
     scene = mj.MjvScene(model, maxgeom=20000)
     context = mj.MjrContext(model, mj.mjtFontScale.mjFONTSCALE_150.value)
 
-    glfw.set_key_callback(window, lambda w, k, s, a, m: _key_callback(w, k, s, a, m, model, data, cmd))
+    reset_requested = [False]
+    glfw.set_key_callback(window, lambda w, k, s, a, m: _key_callback(w, k, s, a, m, model, data, cmd, reset_requested))
     glfw.set_mouse_button_callback(window, _mouse_button)
     glfw.set_cursor_pos_callback(window, lambda w, x, y: _mouse_move(w, x, y, model, scene, cam))
     glfw.set_scroll_callback(window, lambda w, x, y: _scroll(w, x, y, model, scene, cam))
@@ -232,6 +417,143 @@ def main() -> None:
     base_body_id = int(mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "base_link"))
     if base_body_id < 0:
         raise ValueError("Body 'base_link' not found in model.")
+    foot_body_ids = []
+    for name in ("leftFrontLowerLeg", "leftRearLowerLeg", "rightFrontLowerLeg", "rightRearLowerLeg"):
+        bid = int(mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, name))
+        if bid >= 0:
+            foot_body_ids.append(bid)
+    good_geom_id = int(mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "apriltag_good_panel"))
+    bad_geom_id = int(mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "apriltag_bad_panel"))
+    good_base_quat = (
+        np.asarray(model.geom_quat[good_geom_id], dtype=np.float64).copy()
+        if good_geom_id >= 0
+        else np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    )
+    bad_base_quat = (
+        np.asarray(model.geom_quat[bad_geom_id], dtype=np.float64).copy()
+        if bad_geom_id >= 0
+        else np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    )
+    good_mesh_quat = (
+        np.asarray(model.mesh_quat[int(model.geom_dataid[good_geom_id])], dtype=np.float64).copy()
+        if good_geom_id >= 0 and int(model.geom_dataid[good_geom_id]) >= 0
+        else np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    )
+    bad_mesh_quat = (
+        np.asarray(model.mesh_quat[int(model.geom_dataid[bad_geom_id])], dtype=np.float64).copy()
+        if bad_geom_id >= 0 and int(model.geom_dataid[bad_geom_id]) >= 0
+        else np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    )
+    # Build display-frame reference where wall_id=2 has yaw 0 by definition.
+    q_yaw_wall1_inv = np.array([np.cos(0.25 * np.pi), 0.0, 0.0, np.sin(0.25 * np.pi)], dtype=np.float64)
+    good_display_init = _quat_mul(good_base_quat, good_mesh_quat)
+    bad_display_init = _quat_mul(bad_base_quat, bad_mesh_quat)
+    good_display_ref_quat = _quat_mul(q_yaw_wall1_inv, good_display_init)
+    bad_display_ref_quat = _quat_mul(q_yaw_wall1_inv, bad_display_init)
+    tag_rng = np.random.default_rng(int(args.tag_seed))
+    argv = set(sys.argv[1:])
+    tag_wall_offset = (
+        float(args.tag_wall_offset)
+        if "--tag-wall-offset" in argv
+        else float(env_cfg.get("apriltag_wall_offset", args.tag_wall_offset))
+    )
+    tag_wall_span = (
+        float(args.tag_wall_span)
+        if "--tag-wall-span" in argv
+        else float(env_cfg.get("apriltag_wall_span", args.tag_wall_span))
+    )
+    tag_height = (
+        float(args.tag_height)
+        if "--tag-height" in argv
+        else float(env_cfg.get("apriltag_height", args.tag_height))
+    )
+    tag_num_slots = (
+        int(args.tag_wall_num_slots)
+        if "--tag-wall-num-slots" in argv
+        else int(env_cfg.get("apriltag_wall_num_slots", args.tag_wall_num_slots))
+    )
+    if "--tag-randomize-front-wall-only" in argv or "--no-tag-randomize-front-wall-only" in argv:
+        tag_front_only = bool(args.tag_randomize_front_wall_only)
+    else:
+        tag_front_only = bool(env_cfg.get("apriltag_randomize_front_wall_only", args.tag_randomize_front_wall_only))
+    if "--tag-randomize-on-reset" in argv or "--no-tag-randomize-on-reset" in argv:
+        tag_randomize_on_reset = bool(args.tag_randomize_on_reset)
+    else:
+        tag_randomize_on_reset = bool(env_cfg.get("apriltag_randomize_good_goal_on_reset", args.tag_randomize_on_reset))
+    tag_use_bad = bool(env_cfg.get("apriltag_use_bad_tag", True))
+    tag_collect_radius = float(args.tag_collect_radius)
+    tag_deactivate_on_collect = bool(args.tag_deactivate_on_collect)
+    tag_end_episode_on_collect = bool(args.tag_end_episode_on_collect)
+    tag_inactive_xyz = np.array([float(args.tag_inactive_x), float(args.tag_inactive_y), float(args.tag_inactive_z)], dtype=np.float64)
+    tag_wall_surface_inset = 0.004
+    tag_active = good_geom_id >= 0
+    tag_collect_count = 0
+
+    wall_inner_pos = None
+    try:
+        front_id = int(mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "room_wall_front"))
+        back_id = int(mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "room_wall_back"))
+        right_id = int(mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "room_wall_right"))
+        left_id = int(mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, "room_wall_left"))
+        if min(front_id, back_id, right_id, left_id) >= 0:
+            front_cy = float(model.geom_pos[front_id, 1])
+            back_cy = float(model.geom_pos[back_id, 1])
+            right_cx = float(model.geom_pos[right_id, 0])
+            left_cx = float(model.geom_pos[left_id, 0])
+            front_t = float(model.geom_size[front_id, 1])
+            back_t = float(model.geom_size[back_id, 1])
+            right_t = float(model.geom_size[right_id, 0])
+            left_t = float(model.geom_size[left_id, 0])
+            wall_inner_pos = {
+                0: back_cy - back_t,    # back wall inner y
+                1: front_cy + front_t,  # front wall inner y
+                2: right_cx - right_t,  # right wall inner x
+                3: left_cx + left_t,    # left wall inner x
+            }
+    except Exception:
+        wall_inner_pos = None
+
+    def _resample_and_apply_tag_pose() -> Optional[Tuple[np.ndarray, int, np.ndarray]]:
+        if not tag_randomize_on_reset or good_geom_id < 0:
+            return None
+        goal_xy, wall_id, inward = _sample_apriltag_goal_xy(
+            tag_rng,
+            wall_offset=tag_wall_offset,
+            wall_span=tag_wall_span,
+            front_wall_only=tag_front_only,
+            wall_num_slots=tag_num_slots,
+        )
+        _apply_apriltag_pose(
+            model=model,
+            data=data,
+            good_geom_id=good_geom_id,
+            bad_geom_id=bad_geom_id,
+            good_display_ref_quat=good_display_ref_quat,
+            bad_display_ref_quat=bad_display_ref_quat,
+            good_mesh_quat=good_mesh_quat,
+            bad_mesh_quat=bad_mesh_quat,
+            use_bad_tag=tag_use_bad,
+            good_wall_id=wall_id,
+            good_xy=goal_xy,
+            tag_height=tag_height,
+            wall_offset=tag_wall_offset,
+            wall_span=tag_wall_span,
+            wall_surface_inset=tag_wall_surface_inset,
+            wall_inner_pos=wall_inner_pos,
+        )
+        return goal_xy, wall_id, inward
+
+    tag_init = _resample_and_apply_tag_pose()
+    if tag_init is not None:
+        goal_xy, wall_id, _ = tag_init
+        gpos = np.asarray(model.geom_pos[good_geom_id], dtype=np.float64)
+        gquat = np.asarray(model.geom_quat[good_geom_id], dtype=np.float64)
+        gnorm = _geom_normal_from_quat_wxyz(gquat)
+        print(
+            f"[tag] init wall_id={wall_id} sampled=({goal_xy[0]:+.3f},{goal_xy[1]:+.3f},{tag_height:+.3f}) "
+            f"applied=({gpos[0]:+.3f},{gpos[1]:+.3f},{gpos[2]:+.3f}) "
+            f"normal=({gnorm[0]:+.3f},{gnorm[1]:+.3f},{gnorm[2]:+.3f})"
+        )
     goal_site_id = int(mj.mj_name2id(model, mj.mjtObj.mjOBJ_SITE, args.goal_site_name))
     goal_enabled = goal_site_id >= 0
     goal_rng = np.random.default_rng(int(args.goal_seed))
@@ -254,6 +576,30 @@ def main() -> None:
     cmd_rng_yaw = (float(args.yaw_min), float(args.yaw_max))
 
     while not glfw.window_should_close(window):
+        if reset_requested[0]:
+            mj.mj_resetData(model, data)
+            if model.nkey > 0:
+                try:
+                    mj.mj_resetDataKeyframe(model, data, 0)
+                except Exception:
+                    pass
+            mj.mj_forward(model, data)
+            cmd[:] = 0.0
+            tag_new = _resample_and_apply_tag_pose()
+            tag_active = good_geom_id >= 0
+            if tag_new is not None:
+                goal_xy_r, wall_id_r, _ = tag_new
+                gpos = np.asarray(model.geom_pos[good_geom_id], dtype=np.float64)
+                gquat = np.asarray(model.geom_quat[good_geom_id], dtype=np.float64)
+                gnorm = _geom_normal_from_quat_wxyz(gquat)
+                print(
+                    f"[tag] reset t={data.time:.2f}s wall_id={wall_id_r} "
+                    f"sampled=({goal_xy_r[0]:+.3f},{goal_xy_r[1]:+.3f},{tag_height:+.3f}) "
+                    f"applied=({gpos[0]:+.3f},{gpos[1]:+.3f},{gpos[2]:+.3f}) "
+                    f"normal=({gnorm[0]:+.3f},{gnorm[1]:+.3f},{gnorm[2]:+.3f})"
+                )
+            reset_requested[0] = False
+
         now = time.monotonic()
         wall_dt = max(1e-6, now - wall_prev)
         wall_prev = now
@@ -288,6 +634,29 @@ def main() -> None:
         t_prev = data.time
         while data.time - t_prev < 1.0 / 60.0:
             mj.mj_step(model, data)
+
+        if tag_active and good_geom_id >= 0:
+            base_xy = np.asarray(data.xpos[base_body_id, :2], dtype=np.float64)
+            points_xy = [base_xy]
+            for bid in foot_body_ids:
+                points_xy.append(np.asarray(data.xpos[bid, :2], dtype=np.float64))
+            pts = np.stack(points_xy, axis=0)
+            tag_xy = np.asarray(model.geom_pos[good_geom_id, :2], dtype=np.float64)
+            dists = np.linalg.norm(pts - tag_xy[None, :], axis=1)
+            tag_dist = float(np.min(dists))
+            if tag_dist <= tag_collect_radius:
+                tag_collect_count += 1
+                tag_active = False
+                print(
+                    f"[tag-collect] t={data.time:.2f}s count={tag_collect_count} "
+                    f"dist={tag_dist:.3f} radius={tag_collect_radius:.3f}"
+                )
+                if tag_deactivate_on_collect:
+                    model.geom_pos[good_geom_id, :] = tag_inactive_xyz
+                    model.geom_rgba[good_geom_id, 3] = 0.0
+                    mj.mj_forward(model, data)
+                if tag_end_episode_on_collect:
+                    reset_requested[0] = True
 
         if goal_enabled:
             base_xy = np.asarray(data.xpos[base_body_id, :2], dtype=np.float64)
@@ -326,15 +695,47 @@ def main() -> None:
         mj.mjv_updateScene(model, data, opt, None, fixed_cam, mj.mjtCatBit.mjCAT_ALL.value, scene)
         mj.mjr_render(inset, scene, context)
 
-        if args.show_grayscale and cv2 is not None:
+        tag_status = "AprilTag: detector disabled"
+        read_pixels = bool(args.show_grayscale) or (tag_detector is not None)
+        if read_pixels and cv2 is not None:
             rgb = np.zeros((inset_h, inset_w, 3), dtype=np.uint8)
             depth = np.zeros((inset_h, inset_w), dtype=np.float32)
             mj.mjr_readPixels(rgb, depth, inset, context)
-            gray = np.dot(rgb[..., :3], [0.2989, 0.5870, 0.1140])
-            bw = np.stack([gray] * 3, axis=-1).astype(np.uint8)
-            bw = cv2.flip(bw, 0)
-            cv2.imshow("camera_grayscale", cv2.cvtColor(bw, cv2.COLOR_RGB2BGR))
-            cv2.waitKey(1)
+            rgb = cv2.flip(rgb, 0)
+            gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+            if use_cv_resize:
+                gray_cv = cv2.resize(gray, (cv_input_w, cv_input_h), interpolation=cv2.INTER_AREA)
+            else:
+                gray_cv = gray
+            if tag_detector is not None:
+                corners, ids, _ = tag_detector.detectMarkers(gray_cv)
+                if ids is None or len(ids) == 0:
+                    tag_status = "AprilTag: NONE"
+                else:
+                    tag_ids = [int(x) for x in ids.reshape(-1).tolist()]
+                    if int(args.good_tag_id) in tag_ids:
+                        tag_status = f"AprilTag: GOOD id={int(args.good_tag_id)}"
+                    elif int(args.bad_tag_id) in tag_ids:
+                        tag_status = f"AprilTag: BAD id={int(args.bad_tag_id)}"
+                    else:
+                        tag_status = f"AprilTag: OTHER ids={tag_ids}"
+            if args.show_grayscale:
+                gray_bgr = cv2.cvtColor(gray_cv, cv2.COLOR_GRAY2BGR)
+                if tag_detector is not None and ids is not None and len(ids) > 0:
+                    cv2.aruco.drawDetectedMarkers(gray_bgr, corners, ids)
+                cv2.imshow("camera_grayscale", gray_bgr)
+                cv2.waitKey(1)
+        elif tag_detector is not None:
+            tag_status = "AprilTag: readback unavailable"
+
+        mj.mjr_overlay(
+            mj.mjtFontScale.mjFONTSCALE_150,
+            mj.mjtGridPos.mjGRID_TOPLEFT,
+            viewport,
+            "Tag Status",
+            tag_status,
+            context,
+        )
 
         if args.print_camera_config:
             print(
