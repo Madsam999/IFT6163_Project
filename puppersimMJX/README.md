@@ -66,6 +66,7 @@ python puppersimMJX/pupper_train_ppo_brax.py \
 ```
 This profile is configured to:
 * use camera-based high-level observations (`high_level_obs_mode=camera`)
+* for non-privileged camera-like features, use `high_level_obs_mode=camera_nopriv` (adds perspective `apparent_tag_scale`, no direct distance-to-tag term in observation)
 * use the pretrained low-level locomotion bundle
 * update high-level commands at `4 Hz` (`high_level_policy_hz=4.0`)
 * quantize camera UV features (`camera_obs_uv_bins`) for lower-fidelity camera features
@@ -114,6 +115,7 @@ Available starter profiles:
 * `puppersimMJX/tasks/navigation/config/training_profiles/sparse_navigation_nav_controller.json`
 * `puppersimMJX/tasks/navigation/config/training_profiles/sparse_collect_spheres.json`
 * `puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_hl.json`
+* `puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_nopriv_hl.json`
 * `puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_hl_easy_single_tag.json`
 * `puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_state_hl.json`
 

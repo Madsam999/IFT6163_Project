@@ -1,0 +1,247 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import flax.linen as nn
+import jax
+import jax.numpy as jnp
+import optax
+from brax.envs import base
+
+
+@dataclass(frozen=True)
+class ICMConfig:
+    enabled: bool = False
+    feature_dim: int = 64
+    hidden_dim: int = 128
+    learning_rate: float = 3e-4
+    beta: float = 0.2
+    eta: float = 1.0
+    reward_weight: float = 0.05
+    reward_weight_final: float = 0.0
+    anneal_steps: int = 25_000_000
+    anneal_schedule: str = "linear"
+    reward_clip: float = 0.0
+
+
+class _ICMNet(nn.Module):
+    feature_dim: int
+    hidden_dim: int
+
+    @nn.compact
+    def __call__(self, obs: jax.Array, next_obs: jax.Array, action: jax.Array):
+        def encode(x):
+            x = nn.elu(nn.Dense(self.hidden_dim)(x))
+            return nn.elu(nn.Dense(self.feature_dim)(x))
+
+        phi = encode(obs)
+        phi_next = encode(next_obs)
+
+        inv_in = jnp.concatenate([phi, phi_next], axis=-1)
+        action_hat = nn.Dense(self.hidden_dim)(inv_in)
+        action_hat = nn.elu(action_hat)
+        action_hat = nn.Dense(action.shape[-1])(action_hat)
+
+        fwd_in = jnp.concatenate([phi, action], axis=-1)
+        phi_next_hat = nn.Dense(self.hidden_dim)(fwd_in)
+        phi_next_hat = nn.elu(phi_next_hat)
+        phi_next_hat = nn.Dense(self.feature_dim)(phi_next_hat)
+        return phi_next, phi_next_hat, action_hat
+
+
+def _flatten_obs(obs: Any, batch_size: int) -> jax.Array:
+    leaves = jax.tree_util.tree_leaves(obs)
+    if not leaves:
+        raise ValueError("ICM received empty observation tree.")
+
+    flat = []
+    for leaf in leaves:
+        x = jnp.asarray(leaf)
+        if x.ndim == 0:
+            x = jnp.broadcast_to(x, (batch_size, 1))
+        elif x.shape[0] == batch_size:
+            x = jnp.reshape(x, (batch_size, -1))
+        else:
+            x = jnp.reshape(x, (1, -1))
+            x = jnp.broadcast_to(x, (batch_size, x.shape[-1]))
+        flat.append(x)
+    return jnp.concatenate(flat, axis=-1)
+
+
+def _flatten_action(action: jax.Array, batch_size: int) -> jax.Array:
+    action = jnp.asarray(action)
+    if action.ndim == 1:
+        action = jnp.reshape(action, (1, -1))
+    elif action.ndim > 2:
+        action = jnp.reshape(action, (action.shape[0], -1))
+    if action.shape[0] != batch_size:
+        action = jnp.broadcast_to(action, (batch_size, action.shape[-1]))
+    return action
+
+
+def _to_batch_scalar(x: jax.Array, batch_size: int) -> jax.Array:
+    x = jnp.asarray(x)
+    if x.ndim == 0:
+        return jnp.full((batch_size,), x)
+    return jnp.reshape(x, (batch_size,))
+
+
+def _batch_size_from_reward(reward: jax.Array) -> int:
+    reward_arr = jnp.asarray(reward)
+    return int(reward_arr.shape[0]) if reward_arr.ndim > 0 else 1
+
+
+def _add_batch_axis(tree: Any, batch_size: int):
+    return jax.tree_util.tree_map(
+        lambda x: jnp.broadcast_to(jnp.asarray(x), (batch_size,) + jnp.asarray(x).shape),
+        tree,
+    )
+
+
+class ICMWrapper(base.Wrapper):
+    """Adds ICM intrinsic reward and online ICM updates to a Brax env."""
+
+    def __init__(self, env: base.Env, config: ICMConfig, seed: int = 0):
+        super().__init__(env)
+        self._cfg = config
+        self._seed = int(seed)
+        self._net = _ICMNet(feature_dim=int(config.feature_dim), hidden_dim=int(config.hidden_dim))
+        self._opt = optax.adam(float(config.learning_rate))
+
+    def _reward_weight(self, env_steps: jax.Array) -> jax.Array:
+        start = float(self._cfg.reward_weight)
+        end = float(self._cfg.reward_weight_final)
+        if int(self._cfg.anneal_steps) <= 0:
+            return jnp.array(start, dtype=jnp.float32)
+
+        schedule = str(self._cfg.anneal_schedule or "linear").strip().lower()
+        progress = jnp.clip(
+            jnp.asarray(env_steps, dtype=jnp.float32) / float(max(1, int(self._cfg.anneal_steps))),
+            0.0,
+            1.0,
+        )
+        if schedule == "none":
+            return jnp.array(start, dtype=jnp.float32)
+        if schedule == "cosine":
+            return jnp.array(end + (start - end) * (0.5 * (1.0 + jnp.cos(jnp.pi * progress))), dtype=jnp.float32)
+        if schedule == "exp":
+            return jnp.array(end + (start - end) * jnp.exp(-5.0 * progress), dtype=jnp.float32)
+        return jnp.array(start + (end - start) * progress, dtype=jnp.float32)
+
+    def _init_icm_state(self, state: base.State) -> dict[str, Any]:
+        batch_size = _batch_size_from_reward(state.reward)
+        obs = _flatten_obs(state.obs, batch_size=batch_size)
+        action = jnp.zeros((batch_size, int(self.action_size)), dtype=obs.dtype)
+
+        init_key = jax.random.PRNGKey(self._seed)
+        base_params = self._net.init(init_key, obs[:1], obs[:1], action[:1])["params"]
+        base_opt_state = self._opt.init(base_params)
+        params = _add_batch_axis(base_params, batch_size=batch_size)
+        opt_state = _add_batch_axis(base_opt_state, batch_size=batch_size)
+
+        return {
+            "icm_params": params,
+            "icm_opt_state": opt_state,
+            "icm_env_steps": jnp.zeros((batch_size,), dtype=jnp.int32),
+        }
+
+    def reset(self, rng: jax.Array) -> base.State:
+        state = self.env.reset(rng)
+        if not bool(self._cfg.enabled):
+            return state
+
+        info = dict(state.info)
+        info.update(self._init_icm_state(state))
+        metrics = dict(state.metrics)
+        reward_shape = jnp.asarray(state.reward).shape
+        zeros = jnp.zeros(reward_shape, dtype=jnp.float32)
+        metrics.update(
+            {
+                "icm_reward": zeros,
+                "icm_reward_weight": zeros,
+                "icm_forward_loss": zeros,
+                "icm_inverse_loss": zeros,
+                "icm_total_loss": zeros,
+            }
+        )
+        return state.replace(info=info, metrics=metrics)
+
+    def step(self, state: base.State, action: jax.Array) -> base.State:
+        next_state = self.env.step(state, action)
+        if not bool(self._cfg.enabled):
+            return next_state
+
+        info = dict(state.info)
+        params = info["icm_params"]
+        opt_state = info["icm_opt_state"]
+        env_steps = info["icm_env_steps"]
+
+        batch_size = _batch_size_from_reward(next_state.reward)
+        obs = _flatten_obs(state.obs, batch_size=batch_size)
+        next_obs = _flatten_obs(next_state.obs, batch_size=batch_size)
+        action_flat = _flatten_action(action, batch_size)
+        done = _to_batch_scalar(next_state.done, batch_size)
+        mask = 1.0 - done
+
+        def loss_fn(model_params, obs_i, next_obs_i, action_i, mask_i):
+            phi_next, phi_next_hat, action_hat = self._net.apply(
+                {"params": model_params},
+                obs_i[jnp.newaxis, :],
+                next_obs_i[jnp.newaxis, :],
+                action_i[jnp.newaxis, :],
+            )
+            forward_err = 0.5 * jnp.sum(
+                jnp.square(phi_next_hat[0] - jax.lax.stop_gradient(phi_next[0])), axis=-1
+            )
+            inverse_err = 0.5 * jnp.sum(jnp.square(action_hat[0] - action_i), axis=-1)
+            forward_loss = forward_err * mask_i
+            inverse_loss = inverse_err * mask_i
+            total = (1.0 - float(self._cfg.beta)) * inverse_loss + float(self._cfg.beta) * forward_loss
+            return total, (forward_err, forward_loss, inverse_loss)
+
+        per_env_value_and_grad = jax.vmap(jax.value_and_grad(loss_fn, has_aux=True))
+        (icm_loss, (forward_err, forward_loss, inverse_loss)), grads = per_env_value_and_grad(
+            params, obs, next_obs, action_flat, mask
+        )
+
+        def _update_step(g, s, p):
+            return self._opt.update(g, s, p)
+
+        updates, new_opt_state = jax.vmap(_update_step)(grads, opt_state, params)
+        new_params = jax.vmap(optax.apply_updates)(params, updates)
+
+        intrinsic_reward = float(self._cfg.eta) * forward_err
+        if float(self._cfg.reward_clip) > 0:
+            intrinsic_reward = jnp.clip(intrinsic_reward, 0.0, float(self._cfg.reward_clip))
+        intrinsic_reward = intrinsic_reward * mask
+
+        # Approximate global env-step annealing under vectorized envs:
+        # per-env step counter * number of parallel envs handled by this wrapper.
+        reward_weight = self._reward_weight(jnp.mean(env_steps) * float(batch_size))
+        shaped_reward = jnp.asarray(next_state.reward) + reward_weight * intrinsic_reward
+
+        new_env_steps = env_steps + jnp.ones_like(env_steps)
+
+        new_info = dict(next_state.info)
+        new_info.update(
+            {
+                "icm_params": new_params,
+                "icm_opt_state": new_opt_state,
+                "icm_env_steps": new_env_steps,
+            }
+        )
+
+        metrics = dict(next_state.metrics)
+        weight_vec = jnp.ones_like(intrinsic_reward) * reward_weight
+        metrics.update(
+            {
+                "icm_reward": intrinsic_reward,
+                "icm_reward_weight": weight_vec,
+                "icm_forward_loss": jnp.ones_like(intrinsic_reward) * forward_loss,
+                "icm_inverse_loss": jnp.ones_like(intrinsic_reward) * inverse_loss,
+                "icm_total_loss": jnp.ones_like(intrinsic_reward) * icm_loss,
+            }
+        )
+
+        return next_state.replace(reward=shaped_reward, info=new_info, metrics=metrics)

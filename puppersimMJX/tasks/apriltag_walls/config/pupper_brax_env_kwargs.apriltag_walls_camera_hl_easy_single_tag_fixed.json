@@ -14,7 +14,7 @@
     "collect_consecutive_steps": 10,
     "collect_bonus": 10.0,
     "require_visibility_for_collect": true,
-    "action_penalty_weight": 0.01
+    "action_penalty_weight": 0.0
   },
   "high_level_obs_mode": "camera",
   "include_goal_in_obs": false,

@@ -14,6 +14,7 @@ import os
 import random
 import sys
 import time
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,18 @@ class Args:
     track: bool = True
     wandb_project_name: str = "pupper_mjx"
     wandb_entity: Optional[str] = None
+    wandb_log_mode: str = "task"
+    wandb_task_metric_keys: str = (
+        "eval/episode_reward,"
+        "eval/episode_goals_collected,"
+        "eval/episode_goal_distance,"
+        "eval/episode_collect_streak,"
+        "eval/episode_apriltag_visible,"
+        "avg_reward,"
+        "success_rate,"
+        "training/kl_mean,"
+        "training/sps"
+    )
 
     env_name: str = "pupper_v2"
     backend: str = "mjx"
@@ -51,9 +64,9 @@ class Args:
     custom_env_module: str = "puppersimMJX.pupper_brax_env_v2"
     custom_env_class: str = "PupperV2BraxEnv"
 
-    total_env_steps: int = 100_000_000
+    total_env_steps: int = 10_000_000
     episode_length: int = 1500
-    eval_interval: int = 500_000
+    eval_interval: int = 100_000
 
     nworld: int = 64
     rollout_length: int = 256
@@ -82,6 +95,7 @@ class Args:
     include_state_in_obs: bool = False
     state_obs_key: str = "state"
     pixels_obs_key: str = "pixels/front"
+    obs_source: str = "pixels"
     obs_grayscale: bool = False
     obs_grayscale_keep_rgb_channels: bool = False
 
@@ -97,7 +111,7 @@ class Args:
 
     capture_video: bool = False
     capture_video_during_training: bool = False
-    video_interval: int = 1_000_000
+    video_interval: int = 250_000
     video_steps: int = 1500
     video_fps: int = 60
     video_dirname: str = "videos"
@@ -154,6 +168,61 @@ def _parse_int_tuple(spec: str, name: str) -> Tuple[int, ...]:
     if any(v <= 0 for v in vals):
         raise ValueError(f"{name} must contain positive integers")
     return vals
+
+
+def _parse_csv_set(spec: str) -> set[str]:
+    return {x.strip() for x in str(spec or "").split(",") if x.strip()}
+
+
+def _filter_wandb_metrics(metric_floats: Mapping[str, float], args: Args) -> Dict[str, float]:
+    mode = str(args.wandb_log_mode or "task").strip().lower()
+    if mode == "all":
+        return dict(metric_floats)
+    if mode != "task":
+        raise ValueError("wandb_log_mode must be one of: task, all")
+
+    explicit_keep = _parse_csv_set(args.wandb_task_metric_keys)
+    out: Dict[str, float] = {}
+    for key, value in metric_floats.items():
+        if key in explicit_keep:
+            out[key] = value
+            continue
+        # Keep canonical aggregate episode reward.
+        if key in ("eval/episode_reward", "training/episode_reward"):
+            out[key] = value
+            continue
+        # Keep core optimization health metrics.
+        if key.startswith("training/") and key.split("/", 1)[-1] in {
+            "sps",
+            "kl_mean",
+            "loss",
+            "total_loss",
+            "policy_loss",
+            "value_loss",
+            "entropy_loss",
+        }:
+            out[key] = value
+            continue
+        # Drop decomposed reward components by default.
+        if "reward_" in key and not key.endswith("reward_task"):
+            continue
+        # Keep goal/collection/apriltag task metrics.
+        if any(
+            token in key
+            for token in (
+                "goal_distance",
+                "goals_collected",
+                "goal_reached",
+                "collect_streak",
+                "apriltag_visible",
+                "distance_progress_reward",
+                "visibility_gate_reward",
+                "avg_reward",
+                "success_rate",
+            )
+        ):
+            out[key] = value
+    return out
 
 
 def _ensure_custom_env_registered(args: Args, envs_module: Any) -> None:
@@ -591,6 +660,20 @@ class PixelObsWrapper(Wrapper):
         return nstate.replace(obs=obs)
 
 
+class VmapEnvWrapper(Wrapper):
+    """Adds batched reset/step support for non-wrapped environments."""
+
+    def reset(self, rng: jp.ndarray) -> Any:
+        if hasattr(rng, "ndim") and int(rng.ndim) == 2:
+            return jax.vmap(self.env.reset)(rng)
+        return self.env.reset(rng)
+
+    def step(self, state: Any, action: jp.ndarray) -> Any:
+        if hasattr(action, "ndim") and int(action.ndim) == 2:
+            return jax.vmap(self.env.step)(state, action)
+        return self.env.step(state, action)
+
+
 def _build_video_rollout(
     env: Any,
     make_policy_builder: Callable[..., Any],
@@ -841,6 +924,7 @@ def main(args: Args) -> None:
         raise ValueError("video_width/video_height must be >= 0")
 
     from brax import envs
+    from brax.training.agents.ppo import networks as ppo_networks
     from brax.training.agents.ppo import networks_vision as ppo_networks_vision
     from brax.training.agents.ppo import train as ppo_train_module
 
@@ -856,10 +940,20 @@ def main(args: Args) -> None:
     env_kwargs = {**profile_env_kwargs, **cli_env_kwargs}
     env_kwargs.setdefault("backend", args.backend)
 
-    base_env = envs.get_environment(args.env_name, **env_kwargs)
-    _assert_warp_render_ready()
+    obs_source = str(args.obs_source or "pixels").strip().lower()
+    if obs_source not in {"pixels", "env_camera_features"}:
+        raise ValueError("obs_source must be one of: pixels, env_camera_features")
+    use_pixel_obs = obs_source == "pixels"
 
-    vision_env = PixelObsWrapper(base_env, args)
+    base_env = envs.get_environment(args.env_name, **env_kwargs)
+    if use_pixel_obs:
+        _assert_warp_render_ready()
+        train_env = PixelObsWrapper(base_env, args)
+        print("info: observation source = rendered pixels via PixelObsWrapper")
+    else:
+        train_env = VmapEnvWrapper(base_env)
+        print("info: observation source = env camera feature vector (no rendered pixels)")
+
     video_main_renderer: Optional[Callable[[Any], jp.ndarray]] = None
     video_inset_renderer: Optional[Callable[[Any], jp.ndarray]] = None
     if bool(args.capture_video) or bool(args.capture_video_during_training):
@@ -911,7 +1005,7 @@ def main(args: Args) -> None:
         except Exception as exc:
             print(f"warning: failed to configure dedicated video cameras: {exc}")
             print("info: using observation pixels for videos to avoid renderer instability in headless mode")
-    if bool(args.normalize_observations) and not bool(args.include_state_in_obs):
+    if use_pixel_obs and bool(args.normalize_observations) and not bool(args.include_state_in_obs):
         print("warning: normalize_observations=true ignored for pixels-only obs; disabling normalization.")
         args.normalize_observations = False
 
@@ -924,36 +1018,55 @@ def main(args: Args) -> None:
     if not (len(cnn_channels) == len(cnn_kernels) == len(cnn_strides)):
         raise ValueError("cnn_channels, cnn_kernels, cnn_strides must have equal lengths")
 
-    vision_factory_kwargs = {
-        "policy_hidden_layer_sizes": policy_hidden,
-        "value_hidden_layer_sizes": value_hidden,
-        "normalise_channels": bool(args.normalise_channels),
-        "policy_obs_key": (args.state_obs_key if bool(args.include_state_in_obs) else ""),
-        "value_obs_key": (args.state_obs_key if bool(args.include_state_in_obs) else ""),
-        # Newer Brax versions may support these; older versions ignore them.
-        "distribution_type": "tanh_normal",
-        "noise_std_type": "scalar",
-        "init_noise_std": float(args.init_action_std),
-        "cnn_output_channels": cnn_channels,
-        "cnn_kernel_size": cnn_kernels,
-        "cnn_stride": cnn_strides,
-        "cnn_padding": str(args.cnn_padding),
-        "cnn_global_pool": str(args.cnn_global_pool),
-    }
-    filtered_vision_factory_kwargs = _filter_kwargs(ppo_networks_vision.make_ppo_networks_vision, vision_factory_kwargs)
-    dropped_vision_keys = sorted(set(vision_factory_kwargs.keys()) - set(filtered_vision_factory_kwargs.keys()))
-    if dropped_vision_keys:
-        print(
-            "warning: installed Brax vision network factory does not support: "
-            + ", ".join(dropped_vision_keys)
+    if use_pixel_obs:
+        vision_factory_kwargs = {
+            "policy_hidden_layer_sizes": policy_hidden,
+            "value_hidden_layer_sizes": value_hidden,
+            "normalise_channels": bool(args.normalise_channels),
+            "policy_obs_key": (args.state_obs_key if bool(args.include_state_in_obs) else ""),
+            "value_obs_key": (args.state_obs_key if bool(args.include_state_in_obs) else ""),
+            # Newer Brax versions may support these; older versions ignore them.
+            "distribution_type": "tanh_normal",
+            "noise_std_type": "scalar",
+            "init_noise_std": float(args.init_action_std),
+            "cnn_output_channels": cnn_channels,
+            "cnn_kernel_size": cnn_kernels,
+            "cnn_stride": cnn_strides,
+            "cnn_padding": str(args.cnn_padding),
+            "cnn_global_pool": str(args.cnn_global_pool),
+        }
+        filtered_vision_factory_kwargs = _filter_kwargs(ppo_networks_vision.make_ppo_networks_vision, vision_factory_kwargs)
+        dropped_vision_keys = sorted(set(vision_factory_kwargs.keys()) - set(filtered_vision_factory_kwargs.keys()))
+        if dropped_vision_keys:
+            print(
+                "warning: installed Brax vision network factory does not support: "
+                + ", ".join(dropped_vision_keys)
+            )
+        network_factory = functools.partial(
+            ppo_networks_vision.make_ppo_networks_vision,
+            **filtered_vision_factory_kwargs,
         )
-
-    network_factory = functools.partial(
-        ppo_networks_vision.make_ppo_networks_vision,
-        **filtered_vision_factory_kwargs,
-    )
-
-    run_name = f"{args.exp_name}_{time.strftime('%Y%m%d-%H%M%S')}_brax_vision"
+        run_name = f"{args.exp_name}_{time.strftime('%Y%m%d-%H%M%S')}_brax_vision"
+    else:
+        mlp_factory_kwargs = {
+            "policy_hidden_layer_sizes": policy_hidden,
+            "value_hidden_layer_sizes": value_hidden,
+            "distribution_type": "tanh_normal",
+            "noise_std_type": "scalar",
+            "init_noise_std": float(args.init_action_std),
+        }
+        filtered_mlp_factory_kwargs = _filter_kwargs(ppo_networks.make_ppo_networks, mlp_factory_kwargs)
+        dropped_mlp_keys = sorted(set(mlp_factory_kwargs.keys()) - set(filtered_mlp_factory_kwargs.keys()))
+        if dropped_mlp_keys:
+            print(
+                "warning: installed Brax MLP network factory does not support: "
+                + ", ".join(dropped_mlp_keys)
+            )
+        network_factory = functools.partial(
+            ppo_networks.make_ppo_networks,
+            **filtered_mlp_factory_kwargs,
+        )
+        run_name = f"{args.exp_name}_{time.strftime('%Y%m%d-%H%M%S')}_brax_camera_features"
     writer = SummaryWriter(os.path.join("runs", run_name))
     writer.add_text("hyperparameters", "|param|value|\n|-|-|\n" + "\n".join(f"|{k}|{v}|" for k, v in vars(args).items()))
 
@@ -971,12 +1084,18 @@ def main(args: Args) -> None:
                 save_code=True,
             )
             wandb = _wandb
+            print(
+                "info: wandb logging mode: "
+                f"{args.wandb_log_mode} (task_keys={args.wandb_task_metric_keys})"
+            )
         except Exception as exc:
             print(f"wandb init failed, disabling tracking: {exc}")
 
     video_state = {"next_step": max(1, int(args.video_interval)), "disabled": False}
     default_video_fps = max(1, int(round(1.0 / float(base_env.dt))))
     video_fps = int(args.video_fps) if int(args.video_fps) > 0 else default_video_fps
+    rolling_train_rewards: deque[float] = deque(maxlen=10)
+    rolling_train_success: deque[float] = deque(maxlen=10)
 
     def progress_fn(step: int, metrics: Mapping[str, Any]) -> None:
         metric_floats = {}
@@ -989,8 +1108,21 @@ def main(args: Args) -> None:
         for k, v in metric_floats.items():
             writer.add_scalar(k, v, step)
 
+        train_reward = metric_floats.get("training/episode_reward", None)
+        train_success_proxy = metric_floats.get("training/episode_goals_collected", None)
+        if train_reward is not None:
+            rolling_train_rewards.append(float(train_reward))
+            if train_success_proxy is not None:
+                rolling_train_success.append(1.0 if float(train_success_proxy) > 0.0 else 0.0)
+            metric_floats["avg_reward"] = float(np.mean(np.asarray(rolling_train_rewards, dtype=np.float32)))
+            if rolling_train_success:
+                metric_floats["success_rate"] = float(np.mean(np.asarray(rolling_train_success, dtype=np.float32)))
+            writer.add_scalar("avg_reward", metric_floats["avg_reward"], step)
+            if "success_rate" in metric_floats:
+                writer.add_scalar("success_rate", metric_floats["success_rate"], step)
+
         if wandb is not None and metric_floats:
-            payload = dict(metric_floats)
+            payload = _filter_wandb_metrics(metric_floats, args)
             payload["num_steps"] = int(step)
             try:
                 wandb.log(payload, step=step)
@@ -1012,7 +1144,7 @@ def main(args: Args) -> None:
                 frames_dir = Path(str(args.debug_eval_frames_dirname)) / run_name
                 frames_dir.mkdir(parents=True, exist_ok=True)
             _debug_eval_obs_sampling(
-                env=vision_env,
+                env=train_env,
                 make_policy_builder=make_policy_builder,
                 params=params,
                 seed=args.seed + 123_000 + int(step),
@@ -1034,7 +1166,7 @@ def main(args: Args) -> None:
 
         try:
             frames = _build_video_rollout(
-                env=vision_env,
+                env=train_env,
                 make_policy_builder=make_policy_builder,
                 params=params,
                 seed=args.seed + 10_000 + int(step),
@@ -1094,21 +1226,35 @@ def main(args: Args) -> None:
         "desired_kl": float(args.target_kl),
         "num_envs": int(args.nworld),
         "seed": int(args.seed),
-        "vision": True,
-        "augment_pixels": bool(args.augment_pixels),
+        "vision": bool(use_pixel_obs),
+        "augment_pixels": bool(args.augment_pixels and use_pixel_obs),
         "wrap_env_fn": _wrap_env_no_vmap,
         "max_devices_per_host": 1,
         "use_pmap_on_reset": False,
         "network_factory": network_factory,
         "progress_fn": progress_fn,
         "policy_params_fn": policy_params_fn,
-        "eval_env": vision_env,
+        "eval_env": train_env,
     }
 
     filtered_train_kwargs = _filter_kwargs(ppo_train, train_kwargs)
+    dropped_train_keys = sorted(set(train_kwargs.keys()) - set(filtered_train_kwargs.keys()))
+    if dropped_train_keys:
+        print(
+            "warning: installed Brax PPO train() does not support: "
+            + ", ".join(dropped_train_keys)
+        )
+    print(
+        "info: effective PPO config: "
+        f"num_envs={filtered_train_kwargs.get('num_envs', '<default>')}, "
+        f"num_eval_envs={filtered_train_kwargs.get('num_eval_envs', '<default>')}, "
+        f"unroll_length={filtered_train_kwargs.get('unroll_length', '<default>')}, "
+        f"batch_size={filtered_train_kwargs.get('batch_size', '<default>')}, "
+        f"num_minibatches={filtered_train_kwargs.get('num_minibatches', '<default>')}"
+    )
 
     training_start = time.time()
-    train_output = ppo_train(environment=vision_env, **filtered_train_kwargs)
+    train_output = ppo_train(environment=train_env, **filtered_train_kwargs)
     if not isinstance(train_output, Sequence) or len(train_output) < 2:
         raise RuntimeError("Unexpected return value from brax PPO train().")
 
@@ -1136,7 +1282,7 @@ def main(args: Args) -> None:
 
     if bool(args.capture_video):
         frames = _build_video_rollout(
-            env=vision_env,
+            env=train_env,
             make_policy_builder=make_inference_fn,
             params=params,
             seed=args.seed + 99_999,

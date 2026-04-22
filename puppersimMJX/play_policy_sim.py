@@ -50,6 +50,39 @@ def _parse_env_kwargs(raw: str) -> Dict:
     return dict(json.loads(raw))
 
 
+def _resolve_xml_path(
+    xml_path_arg: Path,
+    env_cfg: Dict,
+    argv_tokens: set[str],
+) -> Path:
+    # If user explicitly passed --xml-path, honor it.
+    if "--xml-path" in argv_tokens:
+        p = Path(xml_path_arg).expanduser()
+        return p if p.is_absolute() else (Path(_REPO_ROOT) / p).resolve()
+
+    # Otherwise prefer model_path from env kwargs.
+    env_model_path = str(env_cfg.get("model_path", "")).strip()
+    if env_model_path:
+        p = Path(env_model_path).expanduser()
+        p = p if p.is_absolute() else (Path(_REPO_ROOT) / p).resolve()
+        if p.exists():
+            return p
+
+    # Fallback to provided parser default, then common MJX XMLs.
+    p = Path(xml_path_arg).expanduser()
+    p = p if p.is_absolute() else (Path(_REPO_ROOT) / p).resolve()
+    if p.exists():
+        return p
+    for candidate in (
+        Path(_REPO_ROOT) / "puppersim/data/pupper_v2_apriltag_room.xml",
+        Path(_REPO_ROOT) / "puppersim/data/pupper_v2_final_stable_cam.xml",
+        Path(_REPO_ROOT) / "puppersim/data/pupper_v2_final_stable.xml",
+    ):
+        if candidate.exists():
+            return candidate.resolve()
+    return p
+
+
 def _clip_command(cmd: np.ndarray, xr: Tuple[float, float], yr: Tuple[float, float], yrw: Tuple[float, float]) -> np.ndarray:
     out = cmd.copy()
     out[0] = np.clip(out[0], xr[0], xr[1])
@@ -140,6 +173,12 @@ def _sample_goal_xy(rng: np.random.Generator, base_xy: np.ndarray, r_min: float,
     radius = float(rng.uniform(r_min, r_max))
     angle = float(rng.uniform(-np.pi, np.pi))
     return np.array([base_xy[0] + radius * np.cos(angle), base_xy[1] + radius * np.sin(angle)], dtype=np.float64)
+
+
+def _apply_reset_qd_noise(model: mj.MjModel, data: mj.MjData, scale: float, rng: np.random.Generator) -> None:
+    if float(scale) <= 0.0:
+        return
+    data.qvel[:] = np.asarray(data.qvel, dtype=np.float64) + float(scale) * rng.standard_normal(model.nv)
 
 
 def _sample_lateral(rng: np.random.Generator, span: float, num_slots: int) -> float:
@@ -271,10 +310,121 @@ def _geom_normal_from_quat_wxyz(quat_wxyz: np.ndarray) -> np.ndarray:
     return (r @ np.array([0.0, 0.0, 1.0], dtype=np.float64)).astype(np.float64)
 
 
+def _quat_rotate_wxyz(quat_wxyz: np.ndarray, vec_xyz: np.ndarray) -> np.ndarray:
+    qv = np.array([0.0, vec_xyz[0], vec_xyz[1], vec_xyz[2]], dtype=np.float64)
+    out = _quat_mul(_quat_mul(quat_wxyz.astype(np.float64), qv), _quat_inv(quat_wxyz.astype(np.float64)))
+    return out[1:].astype(np.float64)
+
+
+def _camera_like_features(
+    base_pos: np.ndarray,
+    base_quat_wxyz: np.ndarray,
+    tag_pos: np.ndarray,
+    front_camera_offset_in_body: np.ndarray,
+    front_camera_forward_in_body: np.ndarray,
+    front_camera_up_in_body: np.ndarray,
+    camera_tan_half_fov: float,
+    camera_obs_uv_bins: int,
+    camera_obs_tag_half_size_m: float,
+) -> Dict[str, float]:
+    cam_pos = base_pos + _quat_rotate_wxyz(base_quat_wxyz, front_camera_offset_in_body)
+    cam_fwd = _quat_rotate_wxyz(base_quat_wxyz, front_camera_forward_in_body)
+    cam_up = _quat_rotate_wxyz(base_quat_wxyz, front_camera_up_in_body)
+    cam_fwd = cam_fwd / max(1e-6, float(np.linalg.norm(cam_fwd)))
+    cam_up = cam_up / max(1e-6, float(np.linalg.norm(cam_up)))
+    cam_right = np.cross(cam_fwd, cam_up)
+    cam_right = cam_right / max(1e-6, float(np.linalg.norm(cam_right)))
+
+    rel = tag_pos - cam_pos
+    dist = max(1e-6, float(np.linalg.norm(rel)))
+    rel_dir = rel / dist
+
+    z_cam = float(np.dot(rel_dir, cam_fwd))
+    rel_z = float(np.dot(rel, cam_fwd))
+    x_cam = float(np.dot(rel_dir, cam_right))
+    y_cam = float(np.dot(rel_dir, cam_up))
+    tan_half = max(1e-6, float(camera_tan_half_fov))
+    inv_z = 1.0 / max(z_cam, 1e-4)
+    u_raw = (x_cam * inv_z) / tan_half
+    v_raw = (y_cam * inv_z) / tan_half
+    within = (abs(u_raw) <= 1.0) and (abs(v_raw) <= 1.0)
+    u = np.clip(u_raw, -1.0, 1.0)
+    v = np.clip(v_raw, -1.0, 1.0)
+    if int(camera_obs_uv_bins) > 1:
+        bins = float(camera_obs_uv_bins)
+        step = 2.0 / max(bins - 1.0, 1.0)
+        u = np.clip(np.round((u + 1.0) / step) * step - 1.0, -1.0, 1.0)
+        v = np.clip(np.round((v + 1.0) / step) * step - 1.0, -1.0, 1.0)
+    visible = 1.0 if (z_cam > 0.0 and within) else 0.0
+    centering = max(0.0, 1.0 - np.sqrt(min(1.0, float(u * u + v * v))))
+    depth = max(rel_z, 1e-4)
+    apparent_scale_raw = (2.0 * float(camera_obs_tag_half_size_m)) / (depth * tan_half)
+    apparent_scale_raw = float(np.clip(apparent_scale_raw, 0.0, 1.0))
+    apparent_scale = apparent_scale_raw * visible
+    return {
+        "visible": visible,
+        "forward_cos": float(z_cam),
+        "u": float(u),
+        "v": float(v),
+        "centering": float(centering),
+        "apparent_scale": float(apparent_scale),
+        "apparent_scale_raw": float(apparent_scale_raw),
+    }
+
+
+def _forward_clearance_from_room(
+    cam_pos: np.ndarray,
+    cam_fwd: np.ndarray,
+    wall_inner_pos: Optional[Dict[int, float]],
+    max_clearance_m: float,
+) -> float:
+    if wall_inner_pos is None:
+        return 1.0
+    x = float(cam_pos[0])
+    y = float(cam_pos[1])
+    fx = float(cam_fwd[0])
+    fy = float(cam_fwd[1])
+    eps = 1e-6
+    big = 1e6
+    x_min = float(wall_inner_pos[3])
+    x_max = float(wall_inner_pos[2])
+    y_min = float(wall_inner_pos[1])
+    y_max = float(wall_inner_pos[0])
+    inside = (x_min <= x <= x_max) and (y_min <= y <= y_max)
+    if not inside:
+        return 0.0
+
+    tx = []
+    if abs(fx) > eps:
+        t = (x_min - x) / fx
+        y_hit = y + t * fy
+        tx.append(t if (t > 0.0 and y_min <= y_hit <= y_max) else big)
+        t = (x_max - x) / fx
+        y_hit = y + t * fy
+        tx.append(t if (t > 0.0 and y_min <= y_hit <= y_max) else big)
+    else:
+        tx.extend([big, big])
+    if abs(fy) > eps:
+        t = (y_min - y) / fy
+        x_hit = x + t * fx
+        tx.append(t if (t > 0.0 and x_min <= x_hit <= x_max) else big)
+        t = (y_max - y) / fy
+        x_hit = x + t * fx
+        tx.append(t if (t > 0.0 and x_min <= x_hit <= x_max) else big)
+    else:
+        tx.extend([big, big])
+
+    dist = min(tx)
+    max_d = max(1e-3, float(max_clearance_m))
+    dist = min(dist, max_d)
+    return float(np.clip(dist / max_d, 0.0, 1.0))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--xml-path", type=Path, default=Path("puppersim/data/pupper_v2_final_stable_cam_goal.xml"))
     parser.add_argument("--camera-name", type=str, default="front_cam")
+    parser.add_argument("--show-camera-features", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--simend", type=float, default=0.0, help="<=0 means run until window close")
     parser.add_argument("--print-camera-config", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--inset-scale", type=float, default=0.40)
@@ -337,9 +487,21 @@ def main() -> None:
     parser.add_argument("--x-speed", type=float, default=0.4)
     parser.add_argument("--y-speed", type=float, default=0.6)
     parser.add_argument("--yaw-speed", type=float, default=1.0)
+    parser.add_argument("--reset-qd-noise-scale", type=float, default=0.0)
+    parser.add_argument("--reset-noise-seed", type=int, default=0)
     args = parser.parse_args()
 
-    model = mj.MjModel.from_xml_path(str(args.xml_path))
+    env_cfg = _parse_env_kwargs(args.env_kwargs)
+    argv = set(sys.argv[1:])
+    reset_qd_noise_scale = (
+        float(args.reset_qd_noise_scale)
+        if "--reset-qd-noise-scale" in argv
+        else float(env_cfg.get("reset_qd_noise_scale", args.reset_qd_noise_scale))
+    )
+    reset_noise_rng = np.random.default_rng(int(args.reset_noise_seed))
+
+    xml_path = _resolve_xml_path(args.xml_path, env_cfg, argv)
+    model = mj.MjModel.from_xml_path(str(xml_path))
     data = mj.MjData(model)
     mj.mj_resetData(model, data)
     if model.nkey > 0:
@@ -347,9 +509,9 @@ def main() -> None:
             mj.mj_resetDataKeyframe(model, data, 0)
         except Exception:
             pass
+    _apply_reset_qd_noise(model, data, reset_qd_noise_scale, reset_noise_rng)
     mj.mj_forward(model, data)
 
-    env_cfg = _parse_env_kwargs(args.env_kwargs)
     # Optional policy setup.
     bundle = None
     cmd = np.zeros(3, dtype=np.float32)
@@ -451,7 +613,6 @@ def main() -> None:
     good_display_ref_quat = _quat_mul(q_yaw_wall1_inv, good_display_init)
     bad_display_ref_quat = _quat_mul(q_yaw_wall1_inv, bad_display_init)
     tag_rng = np.random.default_rng(int(args.tag_seed))
-    argv = set(sys.argv[1:])
     tag_wall_offset = (
         float(args.tag_wall_offset)
         if "--tag-wall-offset" in argv
@@ -484,6 +645,11 @@ def main() -> None:
     tag_collect_radius = float(args.tag_collect_radius)
     tag_deactivate_on_collect = bool(args.tag_deactivate_on_collect)
     tag_end_episode_on_collect = bool(args.tag_end_episode_on_collect)
+    tag_collect_requires_visible = bool(env_cfg.get("apriltag_collect_requires_visible", True))
+    tag_collect_close_scale_threshold = float(env_cfg.get("apriltag_collect_close_scale_threshold", 0.95))
+    tag_collect_close_forward_cos_threshold = float(
+        env_cfg.get("apriltag_collect_close_forward_cos_threshold", 0.20)
+    )
     tag_inactive_xyz = np.array([float(args.tag_inactive_x), float(args.tag_inactive_y), float(args.tag_inactive_z)], dtype=np.float64)
     tag_wall_surface_inset = 0.004
     tag_active = good_geom_id >= 0
@@ -574,6 +740,19 @@ def main() -> None:
     cmd_rng_x = (float(args.lin_x_min), float(args.lin_x_max))
     cmd_rng_y = (float(args.lin_y_min), float(args.lin_y_max))
     cmd_rng_yaw = (float(args.yaw_min), float(args.yaw_max))
+    front_camera_offset_in_body = np.asarray(
+        env_cfg.get("front_camera_offset_in_body", [0.0001, -0.147, -0.0064]), dtype=np.float64
+    )
+    front_camera_forward_in_body = np.asarray(
+        env_cfg.get("front_camera_forward_in_body", [0.0, -1.0, 0.0]), dtype=np.float64
+    )
+    front_camera_up_in_body = np.asarray(env_cfg.get("front_camera_up_in_body", [0.0, 0.0, 1.0]), dtype=np.float64)
+    camera_obs_fov_deg = float(env_cfg.get("camera_obs_fov_deg", 70.0))
+    camera_tan_half_fov = float(np.tan(0.5 * np.deg2rad(camera_obs_fov_deg)))
+    camera_obs_uv_bins = int(max(0, env_cfg.get("camera_obs_uv_bins", 0)))
+    camera_obs_tag_half_size_m = float(max(1e-6, env_cfg.get("camera_obs_tag_half_size_m", 0.20)))
+    camera_obs_include_forward_clearance = bool(env_cfg.get("camera_obs_include_forward_clearance", False))
+    camera_obs_max_clearance_m = float(max(1e-3, env_cfg.get("camera_obs_max_clearance_m", 3.0)))
 
     while not glfw.window_should_close(window):
         if reset_requested[0]:
@@ -583,8 +762,14 @@ def main() -> None:
                     mj.mj_resetDataKeyframe(model, data, 0)
                 except Exception:
                     pass
+            _apply_reset_qd_noise(model, data, reset_qd_noise_scale, reset_noise_rng)
             mj.mj_forward(model, data)
             cmd[:] = 0.0
+            # Re-arm policy timing after simulation time jumps back to 0.
+            policy_next_t = 0.0
+            if bundle is not None and build_obs is not None and obs_hist is not None:
+                base_obs = build_obs(cmd)
+                obs_hist = np.tile(base_obs[None, :], (obs_hist_len, 1))
             tag_new = _resample_and_apply_tag_pose()
             tag_active = good_geom_id >= 0
             if tag_new is not None:
@@ -644,7 +829,29 @@ def main() -> None:
             tag_xy = np.asarray(model.geom_pos[good_geom_id, :2], dtype=np.float64)
             dists = np.linalg.norm(pts - tag_xy[None, :], axis=1)
             tag_dist = float(np.min(dists))
-            if tag_dist <= tag_collect_radius:
+            collect_ok = tag_dist <= tag_collect_radius
+            if collect_ok and tag_collect_requires_visible:
+                base_pos = np.asarray(data.xpos[base_body_id], dtype=np.float64)
+                base_quat = np.asarray(data.xquat[base_body_id], dtype=np.float64)
+                good_pos = np.asarray(model.geom_pos[good_geom_id], dtype=np.float64)
+                good_feat = _camera_like_features(
+                    base_pos=base_pos,
+                    base_quat_wxyz=base_quat,
+                    tag_pos=good_pos,
+                    front_camera_offset_in_body=front_camera_offset_in_body,
+                    front_camera_forward_in_body=front_camera_forward_in_body,
+                    front_camera_up_in_body=front_camera_up_in_body,
+                    camera_tan_half_fov=camera_tan_half_fov,
+                    camera_obs_uv_bins=camera_obs_uv_bins,
+                    camera_obs_tag_half_size_m=camera_obs_tag_half_size_m,
+                )
+                visible_ok = float(good_feat["visible"]) > 0.5
+                close_override = (
+                    float(good_feat["apparent_scale_raw"]) >= float(tag_collect_close_scale_threshold)
+                    and float(good_feat["forward_cos"]) >= float(tag_collect_close_forward_cos_threshold)
+                )
+                collect_ok = bool(visible_ok or close_override)
+            if collect_ok:
                 tag_collect_count += 1
                 tag_active = False
                 print(
@@ -728,12 +935,80 @@ def main() -> None:
         elif tag_detector is not None:
             tag_status = "AprilTag: readback unavailable"
 
+        camera_feat_lines = []
+        if bool(args.show_camera_features):
+            base_pos = np.asarray(data.xpos[base_body_id], dtype=np.float64)
+            base_quat = np.asarray(data.xquat[base_body_id], dtype=np.float64)
+            if good_geom_id >= 0:
+                good_pos = np.asarray(model.geom_pos[good_geom_id], dtype=np.float64)
+                good_feat = _camera_like_features(
+                    base_pos=base_pos,
+                    base_quat_wxyz=base_quat,
+                    tag_pos=good_pos,
+                    front_camera_offset_in_body=front_camera_offset_in_body,
+                    front_camera_forward_in_body=front_camera_forward_in_body,
+                    front_camera_up_in_body=front_camera_up_in_body,
+                    camera_tan_half_fov=camera_tan_half_fov,
+                    camera_obs_uv_bins=camera_obs_uv_bins,
+                    camera_obs_tag_half_size_m=camera_obs_tag_half_size_m,
+                )
+                camera_feat_lines.append(
+                    "GOOD vis={:.0f} u={:+.2f} v={:+.2f} ctr={:.2f} scale={:.2f}".format(
+                        good_feat["visible"],
+                        good_feat["u"],
+                        good_feat["v"],
+                        good_feat["centering"],
+                        good_feat["apparent_scale"],
+                    )
+                )
+            else:
+                camera_feat_lines.append("GOOD n/a")
+
+            if bad_geom_id >= 0 and bool(tag_use_bad) and float(model.geom_rgba[bad_geom_id, 3]) > 0.0:
+                bad_pos = np.asarray(model.geom_pos[bad_geom_id], dtype=np.float64)
+                bad_feat = _camera_like_features(
+                    base_pos=base_pos,
+                    base_quat_wxyz=base_quat,
+                    tag_pos=bad_pos,
+                    front_camera_offset_in_body=front_camera_offset_in_body,
+                    front_camera_forward_in_body=front_camera_forward_in_body,
+                    front_camera_up_in_body=front_camera_up_in_body,
+                    camera_tan_half_fov=camera_tan_half_fov,
+                    camera_obs_uv_bins=camera_obs_uv_bins,
+                    camera_obs_tag_half_size_m=camera_obs_tag_half_size_m,
+                )
+                camera_feat_lines.append(
+                    "BAD  vis={:.0f} u={:+.2f} v={:+.2f} ctr={:.2f} scale={:.2f}".format(
+                        bad_feat["visible"],
+                        bad_feat["u"],
+                        bad_feat["v"],
+                        bad_feat["centering"],
+                        bad_feat["apparent_scale"],
+                    )
+                )
+            elif bad_geom_id >= 0 and bool(tag_use_bad):
+                camera_feat_lines.append("BAD  inactive")
+
+            if camera_obs_include_forward_clearance:
+                cam_pos = base_pos + _quat_rotate_wxyz(base_quat, front_camera_offset_in_body)
+                cam_fwd = _quat_rotate_wxyz(base_quat, front_camera_forward_in_body)
+                cam_fwd = cam_fwd / max(1e-6, float(np.linalg.norm(cam_fwd)))
+                fclr = _forward_clearance_from_room(
+                    cam_pos=cam_pos,
+                    cam_fwd=cam_fwd,
+                    wall_inner_pos=wall_inner_pos,
+                    max_clearance_m=camera_obs_max_clearance_m,
+                )
+                camera_feat_lines.append(f"FCLR {fclr:.2f}")
+
+        overlay_lines = [tag_status]
+        overlay_lines.extend(camera_feat_lines)
         mj.mjr_overlay(
             mj.mjtFontScale.mjFONTSCALE_150,
             mj.mjtGridPos.mjGRID_TOPLEFT,
             viewport,
-            "Tag Status",
-            tag_status,
+            "Tag Status / Camera Features",
+            "\n".join(overlay_lines),
             context,
         )
 

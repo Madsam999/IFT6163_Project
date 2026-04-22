@@ -191,6 +191,9 @@ def _build_env_class():
             apriltag_wall_num_slots: int = 0,
             apriltag_end_episode_on_collect: bool = True,
             apriltag_deactivate_on_collect: bool = True,
+            apriltag_collect_requires_visible: bool = True,
+            apriltag_collect_close_scale_threshold: float = 0.95,
+            apriltag_collect_close_forward_cos_threshold: float = 0.20,
             apriltag_inactive_pose_xyz: Tuple[float, float, float] = (1000.0, 1000.0, -1000.0),
             front_camera_offset_in_body: Tuple[float, float, float] = (0.0001, -0.147, -0.0064),
             front_camera_forward_in_body: Tuple[float, float, float] = (0.0, -1.0, 0.0),
@@ -198,6 +201,9 @@ def _build_env_class():
             camera_obs_fov_deg: float = 70.0,
             camera_obs_distance_scale: float = 2.0,
             camera_obs_uv_bins: int = 0,
+            camera_obs_tag_half_size_m: float = 0.20,
+            camera_obs_include_forward_clearance: bool = False,
+            camera_obs_max_clearance_m: float = 3.0,
             stand_still_command_threshold: float = 0.05,
             tracking_sigma: float = 0.25,
             feet_air_time_minimum: float = 0.10,
@@ -332,6 +338,13 @@ def _build_env_class():
             self._apriltag_wall_num_slots = int(max(0, apriltag_wall_num_slots))
             self._apriltag_end_episode_on_collect = bool(apriltag_end_episode_on_collect)
             self._apriltag_deactivate_on_collect = bool(apriltag_deactivate_on_collect)
+            self._apriltag_collect_requires_visible = bool(apriltag_collect_requires_visible)
+            self._apriltag_collect_close_scale_threshold = float(
+                max(0.0, min(1.0, apriltag_collect_close_scale_threshold))
+            )
+            self._apriltag_collect_close_forward_cos_threshold = float(
+                max(-1.0, min(1.0, apriltag_collect_close_forward_cos_threshold))
+            )
             self._apriltag_inactive_pose_xyz = jp.array(tuple(float(x) for x in apriltag_inactive_pose_xyz))
             self._front_camera_offset_in_body = jp.array(tuple(float(x) for x in front_camera_offset_in_body))
             self._front_camera_forward_in_body = jp.array(tuple(float(x) for x in front_camera_forward_in_body))
@@ -339,11 +352,15 @@ def _build_env_class():
             self._camera_obs_fov_deg = float(camera_obs_fov_deg)
             self._camera_obs_distance_scale = float(max(1e-6, camera_obs_distance_scale))
             self._camera_obs_uv_bins = int(max(0, camera_obs_uv_bins))
+            self._camera_obs_tag_half_size_m = float(max(1e-6, camera_obs_tag_half_size_m))
+            self._camera_obs_include_forward_clearance = bool(camera_obs_include_forward_clearance)
+            self._camera_obs_max_clearance_m = float(max(1e-3, camera_obs_max_clearance_m))
             fov_rad = np.deg2rad(self._camera_obs_fov_deg)
             self._camera_obs_tan_half_fov = float(np.tan(0.5 * fov_rad))
-            if self._high_level_obs_mode not in ("state", "state_full", "camera"):
+            if self._high_level_obs_mode not in ("state", "state_full", "camera", "camera_nopriv"):
                 raise ValueError(
-                    f"Unknown high_level_obs_mode='{self._high_level_obs_mode}'. Use state/state_full/camera."
+                    f"Unknown high_level_obs_mode='{self._high_level_obs_mode}'. "
+                    "Use state/state_full/camera/camera_nopriv."
                 )
             if self._high_level_obs_mode == "state_full":
                 self._exclude_xy_from_obs = False
@@ -564,6 +581,38 @@ def _build_env_class():
                     "warning: geom 'apriltag_good_panel' not found; "
                     "AprilTag randomization will affect reward/features but not rendered mesh pose."
                 )
+
+            self._room_x_min = None
+            self._room_x_max = None
+            self._room_y_min = None
+            self._room_y_max = None
+            try:
+                import mujoco as _mj
+
+                mj_model = getattr(self.sys, "mj_model", None)
+                if mj_model is not None:
+                    front_id = int(_mj.mj_name2id(mj_model, _mj.mjtObj.mjOBJ_GEOM, "room_wall_front"))
+                    back_id = int(_mj.mj_name2id(mj_model, _mj.mjtObj.mjOBJ_GEOM, "room_wall_back"))
+                    left_id = int(_mj.mj_name2id(mj_model, _mj.mjtObj.mjOBJ_GEOM, "room_wall_left"))
+                    right_id = int(_mj.mj_name2id(mj_model, _mj.mjtObj.mjOBJ_GEOM, "room_wall_right"))
+                    if min(front_id, back_id, left_id, right_id) >= 0:
+                        front_cy = float(mj_model.geom_pos[front_id, 1])
+                        back_cy = float(mj_model.geom_pos[back_id, 1])
+                        left_cx = float(mj_model.geom_pos[left_id, 0])
+                        right_cx = float(mj_model.geom_pos[right_id, 0])
+                        front_t = float(mj_model.geom_size[front_id, 1])
+                        back_t = float(mj_model.geom_size[back_id, 1])
+                        left_t = float(mj_model.geom_size[left_id, 0])
+                        right_t = float(mj_model.geom_size[right_id, 0])
+                        self._room_y_min = front_cy + front_t
+                        self._room_y_max = back_cy - back_t
+                        self._room_x_min = left_cx + left_t
+                        self._room_x_max = right_cx - right_t
+            except Exception:
+                self._room_x_min = None
+                self._room_x_max = None
+                self._room_y_min = None
+                self._room_y_max = None
 
             def _quat_mul_np(a: np.ndarray, b: np.ndarray) -> np.ndarray:
                 aw, ax, ay, az = a
@@ -956,12 +1005,16 @@ def _build_env_class():
             rel_dir = rel / dist
 
             z_cam = jp.dot(rel_dir, cam_fwd)
+            rel_z = jp.dot(rel, cam_fwd)
             x_cam = jp.dot(rel_dir, cam_right)
             y_cam = jp.dot(rel_dir, cam_up)
             tan_half = jp.asarray(self._camera_obs_tan_half_fov, dtype=dtype)
             inv_z = 1.0 / jp.maximum(z_cam, 1e-4)
-            u = x_cam * inv_z / jp.maximum(tan_half, 1e-6)
-            v = y_cam * inv_z / jp.maximum(tan_half, 1e-6)
+            u_raw = x_cam * inv_z / jp.maximum(tan_half, 1e-6)
+            v_raw = y_cam * inv_z / jp.maximum(tan_half, 1e-6)
+            within = (jp.abs(u_raw) <= 1.0) & (jp.abs(v_raw) <= 1.0)
+            u = u_raw
+            v = v_raw
             u = jp.clip(u, -1.0, 1.0)
             v = jp.clip(v, -1.0, 1.0)
             if self._camera_obs_uv_bins > 1:
@@ -971,10 +1024,14 @@ def _build_env_class():
                 v = jp.round((v + 1.0) / step) * step - 1.0
                 u = jp.clip(u, -1.0, 1.0)
                 v = jp.clip(v, -1.0, 1.0)
-            within = (jp.abs(u) <= 1.0) & (jp.abs(v) <= 1.0)
             visible = ((z_cam > 0.0) & within).astype(dtype)
             centering = jp.maximum(0.0, 1.0 - jp.sqrt(jp.minimum(1.0, u * u + v * v)))
             dist_norm = 1.0 / (1.0 + dist / jp.asarray(self._camera_obs_distance_scale, dtype=dtype))
+            depth = jp.maximum(rel_z, 1e-4)
+            tag_half = jp.asarray(self._camera_obs_tag_half_size_m, dtype=dtype)
+            apparent_scale_raw = (2.0 * tag_half) / (depth * jp.maximum(tan_half, 1e-6))
+            apparent_scale_raw = jp.clip(apparent_scale_raw, 0.0, 1.0)
+            apparent_scale = apparent_scale_raw * visible
 
             return {
                 "visible": visible,
@@ -984,7 +1041,63 @@ def _build_env_class():
                 "centering": centering,
                 "distance": dist,
                 "distance_norm": dist_norm,
+                "apparent_scale": apparent_scale,
+                "apparent_scale_raw": apparent_scale_raw,
             }
+
+        def _forward_clearance_feature(self, pipeline_state: Any, dtype: Any):
+            if (
+                self._room_x_min is None
+                or self._room_x_max is None
+                or self._room_y_min is None
+                or self._room_y_max is None
+            ):
+                return jp.asarray(1.0, dtype=dtype)
+
+            base_pos = pipeline_state.x.pos[self._torso_idx].astype(dtype)
+            base_rot = pipeline_state.x.rot[self._torso_idx].astype(dtype)
+            cam_pos = base_pos + math.rotate(self._front_camera_offset_in_body.astype(dtype), base_rot)
+            cam_fwd = math.rotate(self._front_camera_forward_in_body.astype(dtype), base_rot)
+            cam_fwd = cam_fwd / jp.maximum(jp.linalg.norm(cam_fwd), 1e-6)
+
+            x = cam_pos[0]
+            y = cam_pos[1]
+            fx = cam_fwd[0]
+            fy = cam_fwd[1]
+            eps = jp.asarray(1e-6, dtype=dtype)
+            big = jp.asarray(1e6, dtype=dtype)
+
+            x_min = jp.asarray(float(self._room_x_min), dtype=dtype)
+            x_max = jp.asarray(float(self._room_x_max), dtype=dtype)
+            y_min = jp.asarray(float(self._room_y_min), dtype=dtype)
+            y_max = jp.asarray(float(self._room_y_max), dtype=dtype)
+            inside = (x >= x_min) & (x <= x_max) & (y >= y_min) & (y <= y_max)
+
+            t_xmin = (x_min - x) / jp.where(jp.abs(fx) > eps, fx, 1.0)
+            y_xmin = y + t_xmin * fy
+            valid_xmin = (jp.abs(fx) > eps) & (t_xmin > 0.0) & (y_xmin >= y_min) & (y_xmin <= y_max)
+            t_xmin = jp.where(valid_xmin, t_xmin, big)
+
+            t_xmax = (x_max - x) / jp.where(jp.abs(fx) > eps, fx, 1.0)
+            y_xmax = y + t_xmax * fy
+            valid_xmax = (jp.abs(fx) > eps) & (t_xmax > 0.0) & (y_xmax >= y_min) & (y_xmax <= y_max)
+            t_xmax = jp.where(valid_xmax, t_xmax, big)
+
+            t_ymin = (y_min - y) / jp.where(jp.abs(fy) > eps, fy, 1.0)
+            x_ymin = x + t_ymin * fx
+            valid_ymin = (jp.abs(fy) > eps) & (t_ymin > 0.0) & (x_ymin >= x_min) & (x_ymin <= x_max)
+            t_ymin = jp.where(valid_ymin, t_ymin, big)
+
+            t_ymax = (y_max - y) / jp.where(jp.abs(fy) > eps, fy, 1.0)
+            x_ymax = x + t_ymax * fx
+            valid_ymax = (jp.abs(fy) > eps) & (t_ymax > 0.0) & (x_ymax >= x_min) & (x_ymax <= x_max)
+            t_ymax = jp.where(valid_ymax, t_ymax, big)
+
+            dist = jp.minimum(jp.minimum(t_xmin, t_xmax), jp.minimum(t_ymin, t_ymax))
+            max_d = jp.asarray(self._camera_obs_max_clearance_m, dtype=dtype)
+            dist = jp.minimum(dist, max_d)
+            clearance = jp.clip(dist / jp.maximum(max_d, 1e-6), 0.0, 1.0)
+            return jp.where(inside, clearance, jp.asarray(0.0, dtype=dtype))
 
         def _wrap_angle(self, angle: Any):
             return jp.arctan2(jp.sin(angle), jp.cos(angle))
@@ -1021,14 +1134,41 @@ def _build_env_class():
             return command
 
         def _get_obs(self, pipeline_state, command=None, goal_xy=None) -> jp.ndarray:
-            if self._high_level_obs_mode == "camera":
+            if self._high_level_obs_mode in ("camera", "camera_nopriv"):
+                include_privileged = self._high_level_obs_mode == "camera"
+
+                def _pack_camera_feats(feats):
+                    if include_privileged:
+                        return [
+                            feats["visible"],
+                            feats["u"],
+                            feats["v"],
+                            feats["forward_cos"],
+                            feats["centering"],
+                            feats["distance_norm"],
+                        ]
+                    return [
+                        feats["visible"],
+                        feats["u"],
+                        feats["v"],
+                        feats["centering"],
+                        feats["apparent_scale"],
+                    ]
+
+                forward_clearance = jp.asarray(0.0, dtype=pipeline_state.q.dtype)
+                if self._camera_obs_include_forward_clearance:
+                    forward_clearance = self._forward_clearance_feature(
+                        pipeline_state=pipeline_state, dtype=pipeline_state.q.dtype
+                    )
+
                 if goal_xy is None:
+                    feat_dim_per_tag = 6 if include_privileged else 5
                     if self._reward_mode == "apriltag_walls":
-                        camera_obs = jp.zeros((12,), dtype=pipeline_state.q.dtype)
+                        camera_obs = jp.zeros((2 * feat_dim_per_tag,), dtype=pipeline_state.q.dtype)
                         if not self._apriltag_use_bad_tag:
-                            camera_obs = camera_obs[:6]
+                            camera_obs = camera_obs[:feat_dim_per_tag]
                     else:
-                        camera_obs = jp.zeros((6,), dtype=pipeline_state.q.dtype)
+                        camera_obs = jp.zeros((feat_dim_per_tag,), dtype=pipeline_state.q.dtype)
                 else:
                     if self._reward_mode == "apriltag_walls":
                         good_feats = self._apriltag_camera_features(
@@ -1042,52 +1182,20 @@ def _build_env_class():
                                 goal_xy=self._apriltag_bad_goal_xy(dtype=pipeline_state.q.dtype),
                                 dtype=pipeline_state.q.dtype,
                             )
-                            camera_obs = jp.array(
-                                [
-                                    good_feats["visible"],
-                                    good_feats["u"],
-                                    good_feats["v"],
-                                    good_feats["forward_cos"],
-                                    good_feats["centering"],
-                                    good_feats["distance_norm"],
-                                    bad_feats["visible"],
-                                    bad_feats["u"],
-                                    bad_feats["v"],
-                                    bad_feats["forward_cos"],
-                                    bad_feats["centering"],
-                                    bad_feats["distance_norm"],
-                                ],
-                                dtype=pipeline_state.q.dtype,
-                            )
+                            camera_obs = jp.array(_pack_camera_feats(good_feats) + _pack_camera_feats(bad_feats), dtype=pipeline_state.q.dtype)
                         else:
-                            camera_obs = jp.array(
-                                [
-                                    good_feats["visible"],
-                                    good_feats["u"],
-                                    good_feats["v"],
-                                    good_feats["forward_cos"],
-                                    good_feats["centering"],
-                                    good_feats["distance_norm"],
-                                ],
-                                dtype=pipeline_state.q.dtype,
-                            )
+                            camera_obs = jp.array(_pack_camera_feats(good_feats), dtype=pipeline_state.q.dtype)
                     else:
                         feats = self._apriltag_camera_features(
                             pipeline_state=pipeline_state,
                             goal_xy=goal_xy,
                             dtype=pipeline_state.q.dtype,
                         )
-                        camera_obs = jp.array(
-                            [
-                                feats["visible"],
-                                feats["u"],
-                                feats["v"],
-                                feats["forward_cos"],
-                                feats["centering"],
-                                feats["distance_norm"],
-                            ],
-                            dtype=pipeline_state.q.dtype,
-                        )
+                        camera_obs = jp.array(_pack_camera_feats(feats), dtype=pipeline_state.q.dtype)
+                if self._camera_obs_include_forward_clearance:
+                    camera_obs = jp.concatenate(
+                        [camera_obs, jp.array([forward_clearance], dtype=camera_obs.dtype)], axis=0
+                    )
                 if self._reward_requires_command and self._include_command_in_obs:
                     if command is None:
                         command = jp.zeros((3,), dtype=camera_obs.dtype)
@@ -1118,7 +1226,7 @@ def _build_env_class():
 
         def _apply_obs_noise(self, obs: jp.ndarray, rng: jp.ndarray) -> jp.ndarray:
             """Applies sensor-like noise to obs vector."""
-            if self._high_level_obs_mode == "camera":
+            if self._high_level_obs_mode in ("camera", "camera_nopriv"):
                 return obs
             q_size = int(self.sys.q_size()) - (2 if self._exclude_xy_from_obs else 0)
             qd_size = int(self.sys.qd_size())
@@ -1567,6 +1675,15 @@ def _build_env_class():
             goal_distance = self._goal_distance_to_robot(pipeline_state, goal_xy.astype(reward.dtype))
             goal_reached = (goal_distance <= self._goal_reach_tolerance).astype(reward.dtype)
             goal_reached_event = reward_terms.get("goal_reached", goal_reached)
+            if self._reward_mode == "apriltag_walls" and self._apriltag_collect_requires_visible:
+                visible_ok = apriltag_features["visible"] > 0.5
+                close_override = (
+                    (apriltag_features["apparent_scale_raw"] >= self._apriltag_collect_close_scale_threshold)
+                    & (apriltag_features["forward_cos"] >= self._apriltag_collect_close_forward_cos_threshold)
+                )
+                collect_gate = (visible_ok | close_override).astype(reward.dtype)
+                goal_reached = goal_reached * collect_gate
+                goal_reached_event = goal_reached_event * collect_gate
             if self._reward_mode == "apriltag_walls":
                 goal_reached = goal_reached * apriltag_active_prev.astype(reward.dtype)
                 goal_reached_event = goal_reached_event * apriltag_active_prev.astype(reward.dtype)

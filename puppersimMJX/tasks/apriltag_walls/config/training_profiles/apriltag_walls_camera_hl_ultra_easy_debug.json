@@ -1,6 +1,6 @@
 {
-  "name": "apriltag_walls_camera_hl_easy_single_tag",
-  "description": "Easier AprilTag curriculum: single rewarded tag, randomized front-wall x position at reset, no bad-tag penalty stream.",
+  "name": "apriltag_walls_camera_hl_ultra_easy_debug",
+  "description": "Ultra-easy pixel debug profile to validate vision + reward learning signal.",
   "env_kwargs": {
     "model_path": "puppersim/data/pupper_v2_apriltag_room.xml",
     "urdf_path": "puppersim/data/pupper_v2a.urdf",
@@ -12,21 +12,26 @@
     "reward_requires_command": false,
     "reward_config": {
       "use_distance_collect_reward": true,
-      "progress_weight": 1.0,
-      "collect_radius_m": 0.35,
-      "collect_consecutive_steps": 10,
-      "collect_bonus": 10.0,
-      "require_visibility_for_collect": true,
+      "progress_weight": 3.0,
+      "use_visibility_gated_distance_reward": false,
+      "not_visible_penalty": 0.0,
+      "visible_base_reward": 0.3,
+      "visible_distance_bonus_weight": 1.0,
+      "collect_radius_m": 0.8,
+      "collect_consecutive_steps": 1,
+      "collect_bonus": 300.0,
+      "require_visibility_for_collect": false,
       "action_penalty_weight": 0.0
     },
     "high_level_obs_mode": "camera",
     "include_goal_in_obs": false,
-    "goal_reach_tolerance": 0.45,
-    "apriltag_wall_offset": 1.95,
-    "apriltag_wall_span": 0.45,
+    "goal_reach_tolerance": 0.8,
+    "apriltag_wall_offset": 1.3,
+    "apriltag_wall_span": 0.2,
     "apriltag_height": 0.45,
     "apriltag_use_bad_tag": false,
-    "apriltag_randomize_good_goal_on_reset": true,
+    "apriltag_end_episode_on_collect": true,
+    "apriltag_randomize_good_goal_on_reset": false,
     "apriltag_randomize_front_wall_only": true,
     "camera_obs_fov_deg": 48.8,
     "camera_obs_distance_scale": 2.0,
@@ -37,8 +42,8 @@
     "low_level_include_command_in_obs": true,
     "high_level_policy_hz": 8.0,
     "exclude_xy_from_obs": true,
-    "reset_noise_scale": 0.0,
+    "reset_noise_scale": 0.01,
     "reset_base_noise_scale": 0.0,
-    "reset_qd_noise_scale": 0.0
+    "reset_qd_noise_scale": 0.02
   }
 }

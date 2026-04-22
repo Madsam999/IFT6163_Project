@@ -12,8 +12,14 @@ import jax.numpy as jp
 class AprilTagWallsRewardConfig:
     """Config for camera-visibility based AprilTag watching reward."""
 
+    use_sparse_distance_collect_reward: bool = False
+    distance_penalty_weight: float = 1.0
     use_distance_collect_reward: bool = False
     progress_weight: float = 1.0
+    use_visibility_gated_distance_reward: bool = True
+    not_visible_penalty: float = 1.0
+    visible_base_reward: float = 1.0
+    visible_distance_bonus_weight: float = 1.0
     collect_radius_m: float = 0.35
     collect_consecutive_steps: int = 10
     collect_bonus: float = 10.0
@@ -27,7 +33,7 @@ class AprilTagWallsRewardConfig:
     bad_centering_penalty: float = 0.7
     bad_distance_penalty: float = 0.2
     contrastive_distance_weight: float = 0.2
-    action_penalty_weight: float = 0.01
+    action_penalty_weight: float = 0.0
 
 
 def compute_apriltag_walls_reward(
@@ -102,12 +108,46 @@ def build_reward(
     cfg = AprilTagWallsRewardConfig(**dict(config or {}))
 
     def reward_fn(ctx: Dict[str, Any]) -> Tuple[jp.ndarray, Dict[str, jp.ndarray]]:
+        if bool(cfg.use_sparse_distance_collect_reward):
+            d_curr = jp.asarray(ctx.get("goal_distance_override", ctx.get("apriltag_distance", 0.0)))
+            visible = jp.clip(jp.asarray(ctx.get("apriltag_visible", 0.0)), 0.0, 1.0)
+            within_radius = d_curr < float(cfg.collect_radius_m)
+            if bool(cfg.require_visibility_for_collect):
+                within_radius = within_radius & (visible > 0.5)
+            collected = within_radius.astype(d_curr.dtype)
+            action_penalty = jp.mean(jp.square(ctx["action"]))
+            reward = (
+                -float(cfg.distance_penalty_weight) * d_curr
+                + float(cfg.collect_bonus) * collected
+                - float(cfg.action_penalty_weight) * action_penalty
+            )
+            terms = {
+                "task_reward": reward,
+                "goal_reached": collected,
+                "distance_to_tag": d_curr,
+                "within_collect_radius": within_radius.astype(d_curr.dtype),
+                "apriltag_visible": visible,
+                "action_penalty": action_penalty,
+            }
+            return reward, terms
+
         if bool(cfg.use_distance_collect_reward):
             d_curr = jp.asarray(ctx.get("goal_distance_override", ctx.get("apriltag_distance", 0.0)))
             d_prev = jp.asarray(ctx.get("goal_distance_prev", d_curr))
             progress = d_prev - d_curr
+            progress_reward = float(cfg.progress_weight) * progress
 
             visible = jp.clip(ctx["apriltag_visible"], 0.0, 1.0)
+            distance_norm = jp.clip(jp.asarray(ctx.get("apriltag_distance_norm", 0.0)), 0.0, 1.0)
+            visible_gate_reward = jp.asarray(0.0, dtype=d_curr.dtype)
+            if bool(cfg.use_visibility_gated_distance_reward):
+                # Requested shaping:
+                # - if tag not visible: -1
+                # - if visible: base + distance bonus (higher when closer)
+                visible_case = float(cfg.visible_base_reward) + float(cfg.visible_distance_bonus_weight) * distance_norm
+                not_visible_case = -float(cfg.not_visible_penalty)
+                visible_gate_reward = jp.where(visible > 0.5, visible_case, not_visible_case)
+
             within_radius = d_curr < float(cfg.collect_radius_m)
             if bool(cfg.require_visibility_for_collect):
                 within_radius = within_radius & (visible > 0.5)
@@ -118,7 +158,8 @@ def build_reward(
 
             action_penalty = jp.mean(jp.square(ctx["action"]))
             reward = (
-                float(cfg.progress_weight) * progress
+                + progress_reward
+                + visible_gate_reward
                 + float(cfg.collect_bonus) * collected
                 - float(cfg.action_penalty_weight) * action_penalty
             )
@@ -127,9 +168,12 @@ def build_reward(
                 "goal_reached": collected,
                 "collect_streak": streak,
                 "distance_progress": progress,
+                "distance_progress_reward": progress_reward,
                 "distance_to_tag": d_curr,
+                "distance_norm_to_tag": distance_norm,
                 "within_collect_radius": within_radius.astype(d_curr.dtype),
                 "apriltag_visible": visible,
+                "visibility_gate_reward": visible_gate_reward,
                 "action_penalty": action_penalty,
             }
             return reward, terms
