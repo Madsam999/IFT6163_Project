@@ -497,6 +497,9 @@ def _build_single_world_mujoco_renderer(
         if cam_id < 0:
             raise ValueError(f"Camera '{cam_name}' not found in model.")
     good_geom_id = int(mj.mj_name2id(m, mj.mjtObj.mjOBJ_GEOM, "apriltag_good_panel"))
+    ps_good_geom_idx = int(getattr(base_env, "_apriltag_good_geom_idx", -1))
+    if good_geom_id >= 0 and ps_good_geom_idx < 0:
+        ps_good_geom_idx = good_geom_id
     last_tag_sig: Optional[tuple] = None
 
     _VIDEO_RENDERER_KEEPALIVE.append((m, d, renderer, cam_name))
@@ -509,9 +512,16 @@ def _build_single_world_mujoco_renderer(
             raise RuntimeError(f"Pipeline state shape mismatch (q={q.shape[0]}/{m.nq}, qd={qd.shape[0]}/{m.nv})")
         d.qpos[:] = q
         d.qvel[:] = qd
-        if good_geom_id >= 0 and hasattr(pipeline_state, "geom_xpos") and hasattr(pipeline_state, "geom_xmat"):
-            gpos = np.asarray(pipeline_state.geom_xpos[good_geom_id], dtype=np.float64).reshape(-1)
-            gmat = np.asarray(pipeline_state.geom_xmat[good_geom_id], dtype=np.float64).reshape(-1)
+        if (
+            good_geom_id >= 0
+            and ps_good_geom_idx >= 0
+            and hasattr(pipeline_state, "geom_xpos")
+            and hasattr(pipeline_state, "geom_xmat")
+            and ps_good_geom_idx < int(pipeline_state.geom_xpos.shape[0])
+            and ps_good_geom_idx < int(pipeline_state.geom_xmat.shape[0])
+        ):
+            gpos = np.asarray(pipeline_state.geom_xpos[ps_good_geom_idx], dtype=np.float64).reshape(-1)
+            gmat = np.asarray(pipeline_state.geom_xmat[ps_good_geom_idx], dtype=np.float64).reshape(-1)
             q_geom = np.zeros(4, dtype=np.float64)
             mj.mju_mat2Quat(q_geom, gmat)
             sig = (

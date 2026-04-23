@@ -599,6 +599,7 @@ def _save_rollout_video_from_policy_builder(
     policy = jax.jit(policy)
 
     goal_positions_xy: list[np.ndarray] = []
+    apriltag_wall_ids: list[Optional[int]] = []
 
     if randomize_goal_marker:
         try:
@@ -629,6 +630,8 @@ def _save_rollout_video_from_policy_builder(
     state = reset_fn(reset_rng)
     rollout = [state.pipeline_state]
     goal_positions_xy.append(np.asarray(state.info.get("goal_position", jp.zeros((2,), dtype=state.obs.dtype))))
+    wall0 = state.info.get("apriltag_wall_id", None)
+    apriltag_wall_ids.append(None if wall0 is None else int(np.asarray(wall0)))
 
     for _ in range(max(1, int(num_steps))):
         rng, policy_rng = jax.random.split(rng)
@@ -636,12 +639,20 @@ def _save_rollout_video_from_policy_builder(
         state = step_fn(state, action)
         rollout.append(state.pipeline_state)
         goal_positions_xy.append(np.asarray(state.info.get("goal_position", jp.zeros((2,), dtype=state.obs.dtype))))
+        wall_i = state.info.get("apriltag_wall_id", None)
+        apriltag_wall_ids.append(None if wall_i is None else int(np.asarray(wall_i)))
         done_flag = float(np.asarray(state.done))
         if done_flag >= 0.5:
             rng, reset_rng = jax.random.split(rng)
             state = reset_fn(reset_rng)
             rollout.append(state.pipeline_state)
             goal_positions_xy.append(np.asarray(state.info.get("goal_position", jp.zeros((2,), dtype=state.obs.dtype))))
+            wall_r = state.info.get("apriltag_wall_id", None)
+            apriltag_wall_ids.append(None if wall_r is None else int(np.asarray(wall_r)))
+
+    wall_ids_seen = sorted({wid for wid in apriltag_wall_ids if wid is not None})
+    if wall_ids_seen:
+        print(f"video rollout apriltag_wall_ids_seen={wall_ids_seen}")
 
     render_kwargs = {
         "height": int(height),
@@ -706,7 +717,9 @@ def _save_rollout_video_from_policy_builder(
 
         site_id = int(mj.mj_name2id(m, mj.mjtObj.mjOBJ_SITE, goal_marker_site_name))
         if site_id < 0:
-            raise RuntimeError(f"site '{goal_marker_site_name}' not found in MuJoCo model")
+            # Some apriltag profiles do not define a separate goal-marker site.
+            # Keep rendering (and geom pose sync) active even without this site.
+            site_id = -1
 
         cam_id = -1
         if camera_name:
@@ -716,6 +729,15 @@ def _save_rollout_video_from_policy_builder(
 
         if len(goal_positions_xy) != len(rollout):
             raise RuntimeError("goal/rollout length mismatch")
+
+        good_geom_id = int(mj.mj_name2id(m, mj.mjtObj.mjOBJ_GEOM, "apriltag_good_panel"))
+        bad_geom_id = int(mj.mj_name2id(m, mj.mjtObj.mjOBJ_GEOM, "apriltag_bad_panel"))
+        ps_good_geom_idx = int(getattr(env, "_apriltag_good_geom_idx", -1))
+        ps_bad_geom_idx = int(getattr(env, "_apriltag_bad_geom_idx", -1))
+        if good_geom_id >= 0 and ps_good_geom_idx < 0:
+            ps_good_geom_idx = good_geom_id
+        if bad_geom_id >= 0 and ps_bad_geom_idx < 0:
+            ps_bad_geom_idx = bad_geom_id
 
         out_frames = []
         try:
@@ -729,9 +751,28 @@ def _save_rollout_video_from_policy_builder(
 
                 d.qpos[:] = q
                 d.qvel[:] = qd
-                m.site_pos[site_id, 0] = float(np.asarray(gxy)[0])
-                m.site_pos[site_id, 1] = float(np.asarray(gxy)[1])
-                m.site_pos[site_id, 2] = float(goal_marker_z)
+                if site_id >= 0:
+                    m.site_pos[site_id, 0] = float(np.asarray(gxy)[0])
+                    m.site_pos[site_id, 1] = float(np.asarray(gxy)[1])
+                    m.site_pos[site_id, 2] = float(goal_marker_z)
+
+                # Keep AprilTag panel render aligned with env pipeline_state.
+                if hasattr(pstate, "geom_xpos") and hasattr(pstate, "geom_xmat"):
+                    for gid, ps_idx in (
+                        (good_geom_id, ps_good_geom_idx),
+                        (bad_geom_id, ps_bad_geom_idx),
+                    ):
+                        if gid < 0 or ps_idx < 0:
+                            continue
+                        if ps_idx >= int(pstate.geom_xpos.shape[0]) or ps_idx >= int(pstate.geom_xmat.shape[0]):
+                            continue
+                        gpos = np.asarray(pstate.geom_xpos[ps_idx], dtype=np.float64).reshape(-1)
+                        gmat = np.asarray(pstate.geom_xmat[ps_idx], dtype=np.float64).reshape(-1)
+                        if gpos.shape[0] >= 3 and gmat.shape[0] >= 9:
+                            m.geom_pos[gid, :] = gpos[:3]
+                            q_geom = np.zeros(4, dtype=np.float64)
+                            mj.mju_mat2Quat(q_geom, gmat[:9])
+                            m.geom_quat[gid, :] = q_geom
                 mj.mj_forward(m, d)
 
                 if cam_id >= 0:
@@ -746,25 +787,52 @@ def _save_rollout_video_from_policy_builder(
                 pass
         return out_frames
 
+    reward_mode = str(getattr(env, "_reward_mode", "")).strip().lower()
+    prefer_mujoco_renderer = reward_mode == "apriltag_walls"
+
     goal_sync_active = False
     goal_sync_backend = "none"  # one of: none, brax, mujoco
     if sync_goal_marker_to_collectible:
-        try:
-            frames = _render_with_synced_goal(camera_name=camera, frame_w=int(width), frame_h=int(height))
-            goal_sync_active = True
-            goal_sync_backend = "brax"
-        except Exception as exc:
-            print(f"warning: goal marker sync disabled ({exc})")
+        if prefer_mujoco_renderer:
             try:
                 frames = _render_with_mujoco_goal_sync(camera_name=camera, frame_w=int(width), frame_h=int(height))
                 goal_sync_active = True
                 goal_sync_backend = "mujoco"
-                print("info: using MuJoCo fallback renderer for goal-marker sync")
-            except Exception as exc2:
-                print(f"warning: MuJoCo goal sync fallback disabled ({exc2})")
-                frames = env.render(rollout, **render_kwargs)
+                print("info: using MuJoCo renderer for apriltag_walls goal + geom sync")
+            except Exception as exc:
+                print(f"warning: MuJoCo apriltag renderer failed ({exc})")
+                try:
+                    frames = _render_with_synced_goal(camera_name=camera, frame_w=int(width), frame_h=int(height))
+                    goal_sync_active = True
+                    goal_sync_backend = "brax"
+                except Exception as exc2:
+                    print(f"warning: goal marker sync disabled ({exc2})")
+                    frames = env.render(rollout, **render_kwargs)
+        else:
+            try:
+                frames = _render_with_synced_goal(camera_name=camera, frame_w=int(width), frame_h=int(height))
+                goal_sync_active = True
+                goal_sync_backend = "brax"
+            except Exception as exc:
+                print(f"warning: goal marker sync disabled ({exc})")
+                try:
+                    frames = _render_with_mujoco_goal_sync(camera_name=camera, frame_w=int(width), frame_h=int(height))
+                    goal_sync_active = True
+                    goal_sync_backend = "mujoco"
+                    print("info: using MuJoCo fallback renderer for goal-marker sync")
+                except Exception as exc2:
+                    print(f"warning: MuJoCo goal sync fallback disabled ({exc2})")
+                    frames = env.render(rollout, **render_kwargs)
     else:
-        frames = env.render(rollout, **render_kwargs)
+        if prefer_mujoco_renderer:
+            try:
+                frames = _render_with_mujoco_goal_sync(camera_name=camera, frame_w=int(width), frame_h=int(height))
+                print("info: using MuJoCo renderer for apriltag_walls geom sync")
+            except Exception as exc:
+                print(f"warning: MuJoCo apriltag renderer failed ({exc})")
+                frames = env.render(rollout, **render_kwargs)
+        else:
+            frames = env.render(rollout, **render_kwargs)
 
     if front_camera_inset and front_camera_name:
         try:

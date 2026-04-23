@@ -27,7 +27,7 @@
     "apriltag_wall_span": 0.8,
     "apriltag_height": 0.25,
     "apriltag_randomize_good_goal_on_reset": true,
-    "apriltag_randomize_front_wall_only": true,
+    "apriltag_randomize_front_wall_only": false,
     "apriltag_collect_requires_visible": true,
     "apriltag_collect_close_scale_threshold": 0.95,
     "apriltag_collect_close_forward_cos_threshold": 0.20,
