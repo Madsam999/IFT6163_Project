@@ -68,7 +68,7 @@ class Args:
     """save periodic checkpoints during training when callback is supported"""
     params_format: str = "npz"
     """parameter serialization format: npz, flax-bytes, or pickle"""
-    checkpoint_interval: int = 10_000_000
+    checkpoint_interval: int = 100_000_000
     """save a checkpoint every N environment steps"""
     checkpoint_dirname: str = "checkpoints"
     """subdirectory under runs/{run_name} for periodic checkpoints"""
@@ -976,14 +976,24 @@ if __name__ == "__main__":
     success_window = deque(maxlen=10)
     last_video_state: Dict[str, Optional[Path]] = {"path": None}
     last_report_state: Dict[str, Optional[Path]] = {"path": None}
+    video_seed_rng = np.random.default_rng(int(args.seed) + 20260423)
+    report_seed_rng = np.random.default_rng(int(args.seed) + 20260424)
 
     training_start = time.time()
     metric_prefixes_to_log = ("train/", "eval/")
     success_metric_candidates = (
+        "eval/episode_goal_reached",
+        "train/episode_goal_reached",
+        "eval/episode_goal_reached_current",
+        "train/episode_goal_reached_current",
         "eval/goal_reached",
         "train/goal_reached",
         "eval/goal_reached_current",
         "train/goal_reached_current",
+        "eval/episode_goals_collected",
+        "train/episode_goals_collected",
+        "eval/goals_collected",
+        "train/goals_collected",
     )
 
     def progress_fn(num_steps: int, metrics: Mapping[str, Any]):
@@ -998,6 +1008,7 @@ if __name__ == "__main__":
         sps = int(step / elapsed)
         writer.add_scalar("sps", sps, step)
         wandb_payload = {"sps": sps, "num_steps": step}
+        simplified_metrics: Dict[str, float] = {}
         for key, value in metrics.items():
             scalar_value = _as_float(value)
             if scalar_value is None:
@@ -1005,6 +1016,7 @@ if __name__ == "__main__":
             metric_key = _simplify_metric_key(key)
             if not metric_key.startswith(metric_prefixes_to_log):
                 continue
+            simplified_metrics[metric_key] = scalar_value
             writer.add_scalar(metric_key, scalar_value, step)
             wandb_payload[metric_key] = scalar_value
             if metric_key == "train/episode_reward":
@@ -1012,9 +1024,12 @@ if __name__ == "__main__":
             elif metric_key == "eval/episode_reward":
                 reward_window.append(scalar_value)
         for candidate in success_metric_candidates:
-            success_value = _as_float(metrics.get(candidate))
+            success_value = simplified_metrics.get(candidate)
             if success_value is not None:
-                success_window.append(success_value)
+                if "goals_collected" in candidate:
+                    success_window.append(1.0 if float(success_value) > 0.0 else 0.0)
+                else:
+                    success_window.append(float(success_value))
                 break
         if reward_window:
             avg10 = float(np.mean(reward_window))
@@ -1052,7 +1067,7 @@ if __name__ == "__main__":
                 env=eval_env,
                 make_policy_builder=_make_policy,
                 params=params,
-                seed=args.seed + 7777,
+                seed=int(video_seed_rng.integers(0, 2**31 - 1)),
                 output_path=initial_video_path,
                 num_steps=args.video_steps,
                 width=args.video_width,
@@ -1099,7 +1114,7 @@ if __name__ == "__main__":
                 env=eval_env,
                 make_policy_builder=_make_policy,
                 params=params,
-                seed=args.seed + 7788,
+                seed=int(report_seed_rng.integers(0, 2**31 - 1)),
                 output_path=initial_report_path,
                 num_steps=int(args.report_steps),
                 num_stages=int(args.report_num_stages),
@@ -1142,7 +1157,7 @@ if __name__ == "__main__":
                 env=eval_env,
                 make_policy_builder=_make_policy,
                 params=params,
-                seed=args.seed + 9000 + (step // max(1, int(args.video_eval_interval))),
+                seed=int(video_seed_rng.integers(0, 2**31 - 1)),
                 output_path=video_output_path,
                 num_steps=args.video_steps,
                 width=args.video_width,
@@ -1193,7 +1208,7 @@ if __name__ == "__main__":
                 env=eval_env,
                 make_policy_builder=_make_policy,
                 params=params,
-                seed=args.seed + 9500 + (step // max(1, int(args.report_eval_interval))),
+                seed=int(report_seed_rng.integers(0, 2**31 - 1)),
                 output_path=report_output_path,
                 num_steps=int(args.report_steps),
                 num_stages=int(args.report_num_stages),
@@ -1305,7 +1320,7 @@ if __name__ == "__main__":
             env=eval_env,
             make_inference_fn=make_inference_fn,
             params=params,
-            seed=args.seed + 12345,
+            seed=int(video_seed_rng.integers(0, 2**31 - 1)),
             output_path=video_output_path,
             num_steps=args.video_steps,
             width=args.video_width,

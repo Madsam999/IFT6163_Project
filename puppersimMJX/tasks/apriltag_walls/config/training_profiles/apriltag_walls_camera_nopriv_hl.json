@@ -12,10 +12,10 @@
     "reward_requires_command": false,
     "reward_config": {
       "use_sparse_distance_collect_reward": true,
-      "distance_penalty_weight": 1.0,
+      "distance_penalty_weight": 0.0,
       "collect_radius_m": 0.35,
       "collect_bonus": 10.0,
-      "require_visibility_for_collect": false,
+      "require_visibility_for_collect": true,
       "action_penalty_weight": 0.0
     },
     "high_level_obs_mode": "camera_nopriv",
@@ -27,7 +27,7 @@
     "apriltag_wall_span": 0.8,
     "apriltag_height": 0.25,
     "apriltag_randomize_good_goal_on_reset": true,
-    "apriltag_randomize_front_wall_only": false,
+    "apriltag_randomize_front_wall_only": true,
     "apriltag_collect_requires_visible": true,
     "apriltag_collect_close_scale_threshold": 0.95,
     "apriltag_collect_close_forward_cos_threshold": 0.20,
