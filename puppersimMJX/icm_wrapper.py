@@ -20,7 +20,7 @@ class ICMConfig:
     eta: float = 1.0
     reward_weight: float = 0.05
     reward_weight_final: float = 0.0
-    anneal_steps: int = 25_000_000
+    anneal_steps: int = 0
     anneal_schedule: str = "linear"
     reward_clip: float = 0.0
 

@@ -12,7 +12,7 @@ import time
 from collections import deque
 from collections.abc import Mapping as CbMapping
 from collections.abc import Sequence as CbSequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
@@ -115,7 +115,15 @@ class Args:
     learning_rate: float = 3e-4
     """optimizer learning rate"""
     learning_rate_schedule: str = "constant"
-    """learning rate schedule: constant or linear"""
+    """learning-rate schedule: constant, linear, cosine, exp, adaptive_kl"""
+    learning_rate_final: float = 1e-5
+    """final learning rate for linear/cosine/exp schedules"""
+    learning_rate_anneal_steps: int = 0
+    """annealing horizon in env steps for linear/cosine/exp (<=0 uses num_timesteps)"""
+    learning_rate_schedule_min_lr: float = 1e-5
+    """minimum LR bound for adaptive_kl schedule"""
+    learning_rate_schedule_max_lr: float = 1e-2
+    """maximum LR bound for adaptive_kl schedule"""
     entropy_cost: float = 1e-2
     """entropy regularization coefficient"""
     num_envs: int = 8192
@@ -138,8 +146,8 @@ class Args:
     """initial multiplier applied to intrinsic reward before adding to extrinsic reward"""
     icm_reward_weight_final: float = 0.0
     """final intrinsic reward multiplier at schedule end"""
-    icm_anneal_steps: int = 25_000_000
-    """annealing horizon in environment steps for icm_reward_weight"""
+    icm_anneal_steps: int = 0
+    """annealing horizon in environment steps for icm_reward_weight (<=0 uses num_timesteps)"""
     icm_anneal_schedule: str = "linear"
     """anneal schedule: linear, cosine, exp, or none"""
     icm_reward_clip: float = 0.0
@@ -282,6 +290,34 @@ def _parse_profile(raw: str) -> Dict[str, Any]:
     return dict(data)
 
 
+def _apply_profile_train_overrides(args: Args, profile: Mapping[str, Any]) -> Args:
+    overrides = profile.get("train_overrides")
+    if overrides is None:
+        return args
+    if not isinstance(overrides, Mapping):
+        raise ValueError("profile field 'train_overrides' must be a JSON object/dict.")
+
+    defaults = Args()
+    valid_fields = {f.name for f in fields(Args)}
+    applied: Dict[str, Any] = {}
+    for key, value in overrides.items():
+        key_str = str(key)
+        if key_str not in valid_fields:
+            raise ValueError(f"Unknown train_overrides key '{key_str}'.")
+        current_value = getattr(args, key_str)
+        default_value = getattr(defaults, key_str)
+        # CLI args should keep precedence over profile defaults.
+        if current_value != default_value:
+            continue
+        setattr(args, key_str, value)
+        applied[key_str] = value
+
+    if applied:
+        applied_summary = ", ".join(f"{k}={applied[k]}" for k in sorted(applied))
+        print(f"info: applied profile train_overrides: {applied_summary}")
+    return args
+
+
 def _resolve_profile_dict(value: Any, field_name: str) -> Dict[str, Any]:
     if value is None:
         return {}
@@ -398,23 +434,98 @@ def _activation_fn(name: str):
 def _resolve_learning_rate(
     schedule_name: str,
     base_learning_rate: float,
+    final_learning_rate: float,
+    anneal_steps: int,
     total_timesteps: int,
+    adaptive_kl_min_lr: float,
+    adaptive_kl_max_lr: float,
 ):
+    import optax
+
+    class _ScheduleWithScalarFallback:
+        """Callable Optax schedule that can also be cast to scalar for Brax logging."""
+
+        def __init__(self, init_lr: float, schedule_fn: Callable[[Any], Any]):
+            self._init_lr = float(init_lr)
+            self._schedule_fn = schedule_fn
+
+        def __call__(self, count):
+            return self._schedule_fn(count)
+
+        def __array__(self, dtype=None):
+            return np.asarray(self._init_lr, dtype=dtype)
+
+        def __float__(self):
+            return float(self._init_lr)
+
     schedule = str(schedule_name or "constant").strip().lower()
     base_lr = float(base_learning_rate)
     if base_lr <= 0:
         raise ValueError("learning_rate must be > 0.")
+    final_lr = float(final_learning_rate)
+    if final_lr < 0:
+        raise ValueError("learning_rate_final must be >= 0.")
+    transition_steps = int(anneal_steps)
+    if transition_steps <= 0:
+        transition_steps = int(total_timesteps)
+    transition_steps = max(1, transition_steps)
     if schedule == "constant":
-        return base_lr
+        return {
+            "learning_rate": base_lr,
+            "learning_rate_schedule": None,
+            "learning_rate_schedule_min_lr": None,
+            "learning_rate_schedule_max_lr": None,
+        }
     if schedule == "linear":
-        # Brax PPO versions that cast `learning_rate` with `jnp.array(...)`
-        # only accept scalar values, not callables/schedules.
-        print(
-            "warning: learning_rate_schedule=linear requested, but this Brax PPO "
-            "version expects scalar learning_rate. Falling back to constant."
+        schedule_fn = optax.linear_schedule(
+            init_value=base_lr,
+            end_value=final_lr,
+            transition_steps=transition_steps,
         )
-        return base_lr
-    raise ValueError("learning_rate_schedule must be one of: constant, linear")
+        return {
+            "learning_rate": _ScheduleWithScalarFallback(base_lr, schedule_fn),
+            "learning_rate_schedule": None,
+            "learning_rate_schedule_min_lr": None,
+            "learning_rate_schedule_max_lr": None,
+        }
+    if schedule == "cosine":
+        alpha = (final_lr / base_lr) if base_lr > 0 else 0.0
+        alpha = float(np.clip(alpha, 0.0, 1.0))
+        schedule_fn = optax.cosine_decay_schedule(
+            init_value=base_lr,
+            decay_steps=transition_steps,
+            alpha=alpha,
+        )
+        return {
+            "learning_rate": _ScheduleWithScalarFallback(base_lr, schedule_fn),
+            "learning_rate_schedule": None,
+            "learning_rate_schedule_min_lr": None,
+            "learning_rate_schedule_max_lr": None,
+        }
+    if schedule == "exp":
+        safe_final_lr = max(final_lr, 1e-12)
+        decay_rate = float(np.clip(safe_final_lr / base_lr, 1e-12, 1.0))
+        schedule_fn = optax.exponential_decay(
+            init_value=base_lr,
+            transition_steps=transition_steps,
+            decay_rate=decay_rate,
+            staircase=False,
+            end_value=safe_final_lr,
+        )
+        return {
+            "learning_rate": _ScheduleWithScalarFallback(base_lr, schedule_fn),
+            "learning_rate_schedule": None,
+            "learning_rate_schedule_min_lr": None,
+            "learning_rate_schedule_max_lr": None,
+        }
+    if schedule in {"adaptive_kl", "adaptive-kl"}:
+        return {
+            "learning_rate": base_lr,
+            "learning_rate_schedule": "adaptive_kl",
+            "learning_rate_schedule_min_lr": float(adaptive_kl_min_lr),
+            "learning_rate_schedule_max_lr": float(adaptive_kl_max_lr),
+        }
+    raise ValueError("learning_rate_schedule must be one of: constant, linear, cosine, exp, adaptive_kl")
 
 
 def _save_params(path: Path, params: Any) -> str:
@@ -526,6 +637,10 @@ def _make_wrap_env_fn(
 
     from puppersimMJX.icm_wrapper import ICMConfig, ICMWrapper
 
+    effective_icm_anneal_steps = int(args.icm_anneal_steps)
+    if effective_icm_anneal_steps <= 0:
+        effective_icm_anneal_steps = int(args.num_timesteps)
+
     icm_config = ICMConfig(
         enabled=bool(args.icm_enabled),
         feature_dim=int(args.icm_feature_dim),
@@ -535,7 +650,7 @@ def _make_wrap_env_fn(
         eta=float(args.icm_eta),
         reward_weight=float(args.icm_reward_weight),
         reward_weight_final=float(args.icm_reward_weight_final),
-        anneal_steps=int(args.icm_anneal_steps),
+        anneal_steps=effective_icm_anneal_steps,
         anneal_schedule=str(args.icm_anneal_schedule),
         reward_clip=float(args.icm_reward_clip),
     )
@@ -921,6 +1036,7 @@ if __name__ == "__main__":
     random.seed(args.seed)
     np.random.seed(args.seed)
     profile = _parse_profile(args.profile)
+    args = _apply_profile_train_overrides(args, profile)
     task_name = _resolve_task_name(args, profile)
     run_name = _build_run_name(task_name)
     wandb_run_name = task_name
@@ -1002,12 +1118,13 @@ if __name__ == "__main__":
     eval_env = envs.get_environment(args.env_name, **eval_env_kwargs)
     wrap_env_fn = _make_wrap_env_fn(args=args, eval_env_ref=eval_env)
     if args.icm_enabled:
+        effective_icm_anneal_steps = int(args.icm_anneal_steps) if int(args.icm_anneal_steps) > 0 else int(args.num_timesteps)
         print(
             "ICM enabled: "
             f"feature_dim={args.icm_feature_dim}, hidden_dim={args.icm_hidden_dim}, "
             f"lr={args.icm_learning_rate}, beta={args.icm_beta}, eta={args.icm_eta}, "
             f"weight={args.icm_reward_weight}->{args.icm_reward_weight_final}, "
-            f"anneal={args.icm_anneal_schedule}/{args.icm_anneal_steps}, "
+            f"anneal={args.icm_anneal_schedule}/{effective_icm_anneal_steps}, "
             f"clip={args.icm_reward_clip}"
         )
 
@@ -1302,10 +1419,14 @@ if __name__ == "__main__":
 
     eval_interval = max(1, int(args.eval_interval))
     computed_num_evals = max(1, int(args.num_timesteps) // eval_interval + 1)
-    learning_rate_value = _resolve_learning_rate(
+    learning_rate_config = _resolve_learning_rate(
         schedule_name=args.learning_rate_schedule,
         base_learning_rate=args.learning_rate,
+        final_learning_rate=args.learning_rate_final,
+        anneal_steps=args.learning_rate_anneal_steps,
         total_timesteps=args.num_timesteps,
+        adaptive_kl_min_lr=args.learning_rate_schedule_min_lr,
+        adaptive_kl_max_lr=args.learning_rate_schedule_max_lr,
     )
     train_kwargs = {
         "num_timesteps": args.num_timesteps,
@@ -1318,7 +1439,10 @@ if __name__ == "__main__":
         "num_minibatches": args.num_minibatches,
         "num_updates_per_batch": args.num_updates_per_batch,
         "discounting": args.discounting,
-        "learning_rate": learning_rate_value,
+        "learning_rate": learning_rate_config["learning_rate"],
+        "learning_rate_schedule": learning_rate_config["learning_rate_schedule"],
+        "learning_rate_schedule_min_lr": learning_rate_config["learning_rate_schedule_min_lr"],
+        "learning_rate_schedule_max_lr": learning_rate_config["learning_rate_schedule_max_lr"],
         "entropy_cost": args.entropy_cost,
         "num_envs": args.num_envs,
         "batch_size": args.batch_size,

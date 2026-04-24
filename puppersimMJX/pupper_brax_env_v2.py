@@ -190,7 +190,14 @@ def _build_env_class():
             apriltag_randomize_front_wall_only: bool = True,
             apriltag_wall_num_slots: int = 0,
             apriltag_end_episode_on_collect: bool = True,
+            apriltag_end_episode_on_all_collected: bool = False,
             apriltag_deactivate_on_collect: bool = True,
+            apriltag_resample_on_collect: bool = False,
+            apriltag_goals_per_episode: int = 1,
+            apriltag_completion_bonus: float = 0.0,
+            apriltag_include_goals_collected_in_obs: bool = False,
+            apriltag_include_prev_action_in_obs: bool = False,
+            apriltag_include_last_good_seen_in_obs: bool = False,
             apriltag_collect_requires_visible: bool = True,
             apriltag_collect_close_scale_threshold: float = 0.95,
             apriltag_collect_close_forward_cos_threshold: float = 0.20,
@@ -337,7 +344,14 @@ def _build_env_class():
             self._apriltag_randomize_front_wall_only = bool(apriltag_randomize_front_wall_only)
             self._apriltag_wall_num_slots = int(max(0, apriltag_wall_num_slots))
             self._apriltag_end_episode_on_collect = bool(apriltag_end_episode_on_collect)
+            self._apriltag_end_episode_on_all_collected = bool(apriltag_end_episode_on_all_collected)
             self._apriltag_deactivate_on_collect = bool(apriltag_deactivate_on_collect)
+            self._apriltag_resample_on_collect = bool(apriltag_resample_on_collect)
+            self._apriltag_goals_per_episode = int(max(1, apriltag_goals_per_episode))
+            self._apriltag_completion_bonus = float(apriltag_completion_bonus)
+            self._apriltag_include_goals_collected_in_obs = bool(apriltag_include_goals_collected_in_obs)
+            self._apriltag_include_prev_action_in_obs = bool(apriltag_include_prev_action_in_obs)
+            self._apriltag_include_last_good_seen_in_obs = bool(apriltag_include_last_good_seen_in_obs)
             self._apriltag_collect_requires_visible = bool(apriltag_collect_requires_visible)
             self._apriltag_collect_close_scale_threshold = float(
                 max(0.0, min(1.0, apriltag_collect_close_scale_threshold))
@@ -1133,7 +1147,18 @@ def _build_env_class():
             command = jp.where(stop_mask, jp.zeros_like(command), command)
             return command
 
-        def _get_obs(self, pipeline_state, command=None, goal_xy=None) -> jp.ndarray:
+        def _get_obs(
+            self,
+            pipeline_state,
+            command=None,
+            goal_xy=None,
+            goals_collected=None,
+            prev_action_command=None,
+            has_last_good_seen=None,
+            last_good_u=None,
+            last_good_v=None,
+            steps_since_good_seen=None,
+        ) -> jp.ndarray:
             if self._high_level_obs_mode in ("camera", "camera_nopriv"):
                 include_privileged = self._high_level_obs_mode == "camera"
 
@@ -1200,6 +1225,35 @@ def _build_env_class():
                     if command is None:
                         command = jp.zeros((3,), dtype=camera_obs.dtype)
                     camera_obs = jp.concatenate([camera_obs, command.astype(camera_obs.dtype)], axis=0)
+                if self._apriltag_include_goals_collected_in_obs:
+                    if goals_collected is None:
+                        goals_collected = jp.asarray(0.0, dtype=camera_obs.dtype)
+                    camera_obs = jp.concatenate(
+                        [camera_obs, jp.array([goals_collected], dtype=camera_obs.dtype)], axis=0
+                    )
+                if self._apriltag_include_prev_action_in_obs:
+                    if prev_action_command is None:
+                        prev_action_command = jp.zeros((3,), dtype=camera_obs.dtype)
+                    camera_obs = jp.concatenate([camera_obs, prev_action_command.astype(camera_obs.dtype)], axis=0)
+                if self._apriltag_include_last_good_seen_in_obs:
+                    if has_last_good_seen is None:
+                        has_last_good_seen = jp.asarray(0.0, dtype=camera_obs.dtype)
+                    if last_good_u is None:
+                        last_good_u = jp.asarray(0.0, dtype=camera_obs.dtype)
+                    if last_good_v is None:
+                        last_good_v = jp.asarray(0.0, dtype=camera_obs.dtype)
+                    if steps_since_good_seen is None:
+                        steps_since_good_seen = jp.asarray(0.0, dtype=camera_obs.dtype)
+                    camera_obs = jp.concatenate(
+                        [
+                            camera_obs,
+                            jp.array(
+                                [has_last_good_seen, last_good_u, last_good_v, steps_since_good_seen],
+                                dtype=camera_obs.dtype,
+                            ),
+                        ],
+                        axis=0,
+                    )
                 return camera_obs
 
             q = pipeline_state.q
@@ -1218,6 +1272,10 @@ def _build_env_class():
                     base_xy = pipeline_state.x.pos[self._torso_idx][:2].astype(obs.dtype)
                     goal_delta = goal_xy.astype(obs.dtype) - base_xy
                 obs = jp.concatenate([obs, goal_delta], axis=0)
+            if self._apriltag_include_goals_collected_in_obs:
+                if goals_collected is None:
+                    goals_collected = jp.asarray(0.0, dtype=obs.dtype)
+                obs = jp.concatenate([obs, jp.array([goals_collected], dtype=obs.dtype)], axis=0)
             return obs
 
         def _flatten_obs_history(self, obs_hist: jp.ndarray) -> jp.ndarray:
@@ -1349,7 +1407,17 @@ def _build_env_class():
                 ll_base_obs = self._build_low_level_base_obs(pipeline_state, command=command)
                 ll_hist = jp.tile(ll_base_obs[None, :], (self._low_level_obs_history, 1))
 
-            obs = self._get_obs(pipeline_state, command=command, goal_xy=goal_xy)
+            obs = self._get_obs(
+                pipeline_state,
+                command=command,
+                goal_xy=goal_xy,
+                goals_collected=jp.asarray(0.0, dtype=q.dtype),
+                prev_action_command=jp.zeros((3,), dtype=q.dtype),
+                has_last_good_seen=jp.asarray(0.0, dtype=q.dtype),
+                last_good_u=jp.asarray(0.0, dtype=q.dtype),
+                last_good_v=jp.asarray(0.0, dtype=q.dtype),
+                steps_since_good_seen=jp.asarray(0.0, dtype=q.dtype),
+            )
             rng, noise_key = jax.random.split(rng)
             obs = self._apply_obs_noise(obs, noise_key)
             obs_history = jp.tile(obs[None, :], (self._observation_history, 1))
@@ -1364,6 +1432,7 @@ def _build_env_class():
                 "reward_action_accel_penalty": zero,
                 "reward_energy": zero,
                 "reward_torque": zero,
+                "reward_completion_bonus": zero,
                 "reward_tracking_lin_vel": zero,
                 "reward_tracking_ang_vel": zero,
                 "reward_orientation": zero,
@@ -1392,6 +1461,10 @@ def _build_env_class():
                 "goal_reached_current": zero,
                 "goal_resampled": zero,
                 "goals_collected": zero,
+                "has_last_good_seen": zero,
+                "last_good_u": zero,
+                "last_good_v": zero,
+                "steps_since_good_seen": zero,
                 "collect_streak": zero,
                 "tracking_lin_error": zero,
                 "tracking_yaw_error": zero,
@@ -1422,6 +1495,10 @@ def _build_env_class():
                 "goal_position": goal_xy.astype(obs.dtype),
                 "goal_distance_prev": goal_distance.astype(obs.dtype),
                 "goals_collected": zero.astype(obs.dtype),
+                "has_last_good_seen": zero.astype(obs.dtype),
+                "last_good_u": zero.astype(obs.dtype),
+                "last_good_v": zero.astype(obs.dtype),
+                "steps_since_good_seen": zero.astype(obs.dtype),
                 "collect_streak": zero.astype(obs.dtype),
                 "apriltag_wall_id": apriltag_wall_id,
                 "apriltag_wall_normal": apriltag_wall_normal.astype(obs.dtype),
@@ -1688,8 +1765,19 @@ def _build_env_class():
                 goal_reached = goal_reached * apriltag_active_prev.astype(reward.dtype)
                 goal_reached_event = goal_reached_event * apriltag_active_prev.astype(reward.dtype)
             collect_streak = reward_terms.get("collect_streak", state.info.get("collect_streak", jp.asarray(0.0, dtype=reward.dtype)))
-            goals_collected = state.info.get("goals_collected", jp.asarray(0.0, dtype=reward.dtype))
-            goals_collected = goals_collected + goal_reached_event.astype(reward.dtype)
+            goals_collected_prev = state.info.get("goals_collected", jp.asarray(0.0, dtype=reward.dtype))
+            goals_collected = goals_collected_prev + goal_reached_event.astype(reward.dtype)
+            goals_target = jp.asarray(float(self._apriltag_goals_per_episode), dtype=reward.dtype)
+            all_goals_collected = goals_collected >= goals_target
+            completion_collected_now = all_goals_collected & (goals_collected_prev < goals_target)
+            completion_bonus_reward = jp.where(
+                completion_collected_now,
+                jp.asarray(self._apriltag_completion_bonus, dtype=reward.dtype),
+                jp.asarray(0.0, dtype=reward.dtype),
+            )
+            if self._reward_mode == "apriltag_walls":
+                reward = reward + completion_bonus_reward
+                task_reward = task_reward + completion_bonus_reward
             goal_resampled = jp.asarray(0.0, dtype=reward.dtype)
             if self._reward_mode == "sparse_navigation":
                 command_rng, goal_sample_key = jax.random.split(command_rng)
@@ -1706,23 +1794,61 @@ def _build_env_class():
             if self._reward_mode == "apriltag_walls":
                 goal_resampled = jp.asarray(0.0, dtype=reward.dtype)
                 tag_collected_now = goal_reached_event > 0.5
-                apriltag_active = jp.where(tag_collected_now, jp.asarray(0.0, dtype=reward.dtype), apriltag_active_prev.astype(reward.dtype))
+                if self._apriltag_resample_on_collect:
+                    command_rng, apriltag_goal_sample_key = jax.random.split(command_rng)
+                    if self._apriltag_randomize_good_goal_on_reset:
+                        sampled_goal_xy, sampled_wall_id, sampled_wall_normal = self._sample_apriltag_good_goal(
+                            apriltag_goal_sample_key, dtype=reward.dtype
+                        )
+                    else:
+                        sampled_goal_xy = self._apriltag_good_goal_xy(dtype=reward.dtype)
+                        sampled_wall_id = jp.asarray(1, dtype=jp.int32)
+                        sampled_wall_normal = jp.array([0.0, 1.0, 0.0], dtype=reward.dtype)
+                    should_respawn_goal = tag_collected_now & (~all_goals_collected)
+                    goal_xy = jp.where(should_respawn_goal, sampled_goal_xy, goal_xy)
+                    apriltag_wall_id = jp.where(should_respawn_goal, sampled_wall_id, apriltag_wall_id)
+                    apriltag_wall_normal = jp.where(
+                        should_respawn_goal, sampled_wall_normal, apriltag_wall_normal.astype(reward.dtype)
+                    )
+                    pipeline_state = jax.lax.cond(
+                        should_respawn_goal,
+                        lambda ps: self._apply_apriltag_geom_pose(
+                            pipeline_state=ps,
+                            good_goal_xy=sampled_goal_xy.astype(reward.dtype),
+                            good_wall_normal=sampled_wall_normal.astype(reward.dtype),
+                            dtype=reward.dtype,
+                        ),
+                        lambda ps: ps,
+                        pipeline_state,
+                    )
+                else:
+                    should_respawn_goal = jp.asarray(False)
+                apriltag_active = jp.where(
+                    tag_collected_now,
+                    jp.asarray(0.0, dtype=reward.dtype),
+                    apriltag_active_prev.astype(reward.dtype),
+                )
+                apriltag_active = jp.where(should_respawn_goal, jp.asarray(1.0, dtype=reward.dtype), apriltag_active)
+                should_deactivate_tag = tag_collected_now & (~should_respawn_goal)
                 if self._apriltag_deactivate_on_collect:
                     inactive_xy = self._apriltag_inactive_pose_xyz[:2].astype(reward.dtype)
-                    goal_xy = jp.where(apriltag_active > 0.5, goal_xy, inactive_xy)
+                    goal_xy = jp.where(should_deactivate_tag, inactive_xy, goal_xy)
                     pipeline_state = jax.lax.cond(
-                        apriltag_active > 0.5,
-                        lambda ps: ps,
+                        should_deactivate_tag,
                         lambda ps: self._deactivate_apriltag_geom_pose(ps, dtype=reward.dtype),
+                        lambda ps: ps,
                         pipeline_state,
                     )
                 if self._apriltag_end_episode_on_collect:
                     done = jp.maximum(done, tag_collected_now.astype(done.dtype))
+                if self._apriltag_end_episode_on_all_collected:
+                    done = jp.maximum(done, all_goals_collected.astype(done.dtype))
                 goal_delta = goal_xy.astype(reward.dtype) - base_xy
                 goal_distance = self._goal_distance_to_robot(pipeline_state, goal_xy.astype(reward.dtype))
                 goal_reached = (goal_distance <= self._goal_reach_tolerance).astype(reward.dtype)
             else:
                 apriltag_active = apriltag_active_prev.astype(reward.dtype)
+                tag_collected_now = jp.asarray(False)
 
             apriltag_features = self._apriltag_camera_features(
                 pipeline_state=pipeline_state,
@@ -1747,6 +1873,43 @@ def _build_env_class():
                     "distance_norm": z,
                 }
 
+            if self._reward_mode == "apriltag_walls":
+                has_last_good_seen_prev = state.info.get("has_last_good_seen", jp.asarray(0.0, dtype=reward.dtype))
+                last_good_u_prev = state.info.get("last_good_u", jp.asarray(0.0, dtype=reward.dtype))
+                last_good_v_prev = state.info.get("last_good_v", jp.asarray(0.0, dtype=reward.dtype))
+                steps_since_good_seen_prev = state.info.get("steps_since_good_seen", jp.asarray(0.0, dtype=reward.dtype))
+                good_visible_now = (apriltag_features["visible"] > 0.5).astype(reward.dtype)
+                collected_now = tag_collected_now.astype(reward.dtype)
+                has_last_good_seen = jp.where(
+                    collected_now > 0.5,
+                    jp.asarray(0.0, dtype=reward.dtype),
+                    jp.where(good_visible_now > 0.5, jp.asarray(1.0, dtype=reward.dtype), has_last_good_seen_prev),
+                )
+                last_good_u = jp.where(
+                    collected_now > 0.5,
+                    jp.asarray(0.0, dtype=reward.dtype),
+                    jp.where(good_visible_now > 0.5, apriltag_features["u"], last_good_u_prev),
+                )
+                last_good_v = jp.where(
+                    collected_now > 0.5,
+                    jp.asarray(0.0, dtype=reward.dtype),
+                    jp.where(good_visible_now > 0.5, apriltag_features["v"], last_good_v_prev),
+                )
+                steps_since_good_seen = jp.where(
+                    collected_now > 0.5,
+                    jp.asarray(0.0, dtype=reward.dtype),
+                    jp.where(
+                        good_visible_now > 0.5,
+                        jp.asarray(0.0, dtype=reward.dtype),
+                        steps_since_good_seen_prev + jp.asarray(1.0, dtype=reward.dtype),
+                    ),
+                )
+            else:
+                has_last_good_seen = jp.asarray(0.0, dtype=reward.dtype)
+                last_good_u = jp.asarray(0.0, dtype=reward.dtype)
+                last_good_v = jp.asarray(0.0, dtype=reward.dtype)
+                steps_since_good_seen = jp.asarray(0.0, dtype=reward.dtype)
+
             base_vel_world = pipeline_state.xd.vel[self._torso_idx]
             base_ang_world = pipeline_state.xd.ang[self._torso_idx]
             local_vel = math.rotate(base_vel_world, math.quat_inv(torso_quat))
@@ -1754,7 +1917,17 @@ def _build_env_class():
             tracking_lin_error = jp.linalg.norm(command[:2] - local_vel[:2])
             tracking_yaw_error = jp.abs(command[2] - local_ang[2])
 
-            obs = self._get_obs(pipeline_state, command=command, goal_xy=goal_xy)
+            obs = self._get_obs(
+                pipeline_state,
+                command=command,
+                goal_xy=goal_xy,
+                goals_collected=goals_collected.astype(reward.dtype),
+                prev_action_command=command.astype(reward.dtype),
+                has_last_good_seen=has_last_good_seen.astype(reward.dtype),
+                last_good_u=last_good_u.astype(reward.dtype),
+                last_good_v=last_good_v.astype(reward.dtype),
+                steps_since_good_seen=steps_since_good_seen.astype(reward.dtype),
+            )
             obs = self._apply_obs_noise(obs, obs_noise_key)
             prev_hist = state.info.get("obs_history", jp.tile(obs[None, :], (self._observation_history, 1)))
             new_hist = jp.concatenate([prev_hist[1:], obs[None, :]], axis=0)
@@ -1769,6 +1942,7 @@ def _build_env_class():
                 reward_action_accel_penalty=-action_accel_penalty,
                 reward_energy=energy_reward,
                 reward_torque=torque_reward,
+                reward_completion_bonus=completion_bonus_reward,
                 x_position=pos1[0],
                 y_position=pos1[1],
                 z_position=z,
@@ -1793,6 +1967,10 @@ def _build_env_class():
                 goal_reached_current=goal_reached,
                 goal_resampled=goal_resampled,
                 goals_collected=goals_collected,
+                has_last_good_seen=has_last_good_seen,
+                last_good_u=last_good_u,
+                last_good_v=last_good_v,
+                steps_since_good_seen=steps_since_good_seen,
                 collect_streak=collect_streak,
                 tracking_lin_error=tracking_lin_error,
                 tracking_yaw_error=tracking_yaw_error,
@@ -1832,6 +2010,10 @@ def _build_env_class():
             info["goal_position"] = goal_xy
             info["goal_distance_prev"] = goal_distance
             info["goals_collected"] = goals_collected
+            info["has_last_good_seen"] = has_last_good_seen
+            info["last_good_u"] = last_good_u
+            info["last_good_v"] = last_good_v
+            info["steps_since_good_seen"] = steps_since_good_seen
             info["collect_streak"] = collect_streak
             info["apriltag_wall_id"] = apriltag_wall_id
             info["apriltag_wall_normal"] = apriltag_wall_normal

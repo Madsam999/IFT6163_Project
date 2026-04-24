@@ -461,6 +461,9 @@ def main() -> None:
     parser.add_argument("--tag-collect-radius", type=float, default=0.35)
     parser.add_argument("--tag-deactivate-on-collect", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--tag-end-episode-on-collect", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--tag-resample-on-collect", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--tag-goals-per-episode", type=int, default=1)
+    parser.add_argument("--tag-end-episode-on-all-collected", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
         "--tag-inactive-x",
         type=float,
@@ -643,8 +646,28 @@ def main() -> None:
         tag_randomize_on_reset = bool(env_cfg.get("apriltag_randomize_good_goal_on_reset", args.tag_randomize_on_reset))
     tag_use_bad = bool(env_cfg.get("apriltag_use_bad_tag", True))
     tag_collect_radius = float(args.tag_collect_radius)
-    tag_deactivate_on_collect = bool(args.tag_deactivate_on_collect)
-    tag_end_episode_on_collect = bool(args.tag_end_episode_on_collect)
+    if "--tag-deactivate-on-collect" in argv or "--no-tag-deactivate-on-collect" in argv:
+        tag_deactivate_on_collect = bool(args.tag_deactivate_on_collect)
+    else:
+        tag_deactivate_on_collect = bool(env_cfg.get("apriltag_deactivate_on_collect", args.tag_deactivate_on_collect))
+    if "--tag-end-episode-on-collect" in argv or "--no-tag-end-episode-on-collect" in argv:
+        tag_end_episode_on_collect = bool(args.tag_end_episode_on_collect)
+    else:
+        tag_end_episode_on_collect = bool(env_cfg.get("apriltag_end_episode_on_collect", args.tag_end_episode_on_collect))
+    if "--tag-resample-on-collect" in argv or "--no-tag-resample-on-collect" in argv:
+        tag_resample_on_collect = bool(args.tag_resample_on_collect)
+    else:
+        tag_resample_on_collect = bool(env_cfg.get("apriltag_resample_on_collect", args.tag_resample_on_collect))
+    if "--tag-goals-per-episode" in argv:
+        tag_goals_per_episode = int(max(1, args.tag_goals_per_episode))
+    else:
+        tag_goals_per_episode = int(max(1, env_cfg.get("apriltag_goals_per_episode", args.tag_goals_per_episode)))
+    if "--tag-end-episode-on-all-collected" in argv or "--no-tag-end-episode-on-all-collected" in argv:
+        tag_end_episode_on_all_collected = bool(args.tag_end_episode_on_all_collected)
+    else:
+        tag_end_episode_on_all_collected = bool(
+            env_cfg.get("apriltag_end_episode_on_all_collected", args.tag_end_episode_on_all_collected)
+        )
     tag_collect_requires_visible = bool(env_cfg.get("apriltag_collect_requires_visible", True))
     tag_collect_close_scale_threshold = float(env_cfg.get("apriltag_collect_close_scale_threshold", 0.95))
     tag_collect_close_forward_cos_threshold = float(
@@ -654,6 +677,7 @@ def main() -> None:
     tag_wall_surface_inset = 0.004
     tag_active = good_geom_id >= 0
     tag_collect_count = 0
+    tag_episode_collected = 0
 
     wall_inner_pos = None
     try:
@@ -770,6 +794,7 @@ def main() -> None:
             if bundle is not None and build_obs is not None and obs_hist is not None:
                 base_obs = build_obs(cmd)
                 obs_hist = np.tile(base_obs[None, :], (obs_hist_len, 1))
+            tag_episode_collected = 0
             tag_new = _resample_and_apply_tag_pose()
             tag_active = good_geom_id >= 0
             if tag_new is not None:
@@ -853,16 +878,37 @@ def main() -> None:
                 collect_ok = bool(visible_ok or close_override)
             if collect_ok:
                 tag_collect_count += 1
-                tag_active = False
+                tag_episode_collected += 1
                 print(
                     f"[tag-collect] t={data.time:.2f}s count={tag_collect_count} "
                     f"dist={tag_dist:.3f} radius={tag_collect_radius:.3f}"
                 )
-                if tag_deactivate_on_collect:
-                    model.geom_pos[good_geom_id, :] = tag_inactive_xyz
-                    model.geom_rgba[good_geom_id, 3] = 0.0
-                    mj.mj_forward(model, data)
+                episode_target_reached = tag_episode_collected >= int(tag_goals_per_episode)
+                should_respawn_now = bool(tag_resample_on_collect) and (not episode_target_reached)
+                if should_respawn_now:
+                    tag_new = _resample_and_apply_tag_pose()
+                    tag_active = good_geom_id >= 0
+                    if tag_new is not None:
+                        goal_xy_c, wall_id_c, _ = tag_new
+                        gpos = np.asarray(model.geom_pos[good_geom_id], dtype=np.float64)
+                        gquat = np.asarray(model.geom_quat[good_geom_id], dtype=np.float64)
+                        gnorm = _geom_normal_from_quat_wxyz(gquat)
+                        print(
+                            f"[tag] respawn t={data.time:.2f}s wall_id={wall_id_c} "
+                            f"sampled=({goal_xy_c[0]:+.3f},{goal_xy_c[1]:+.3f},{tag_height:+.3f}) "
+                            f"applied=({gpos[0]:+.3f},{gpos[1]:+.3f},{gpos[2]:+.3f}) "
+                            f"normal=({gnorm[0]:+.3f},{gnorm[1]:+.3f},{gnorm[2]:+.3f}) "
+                            f"episode_collected={tag_episode_collected}/{tag_goals_per_episode}"
+                        )
+                else:
+                    tag_active = False
+                    if tag_deactivate_on_collect:
+                        model.geom_pos[good_geom_id, :] = tag_inactive_xyz
+                        model.geom_rgba[good_geom_id, 3] = 0.0
+                        mj.mj_forward(model, data)
                 if tag_end_episode_on_collect:
+                    reset_requested[0] = True
+                if tag_end_episode_on_all_collected and episode_target_reached:
                     reset_requested[0] = True
 
         if goal_enabled:
