@@ -8,6 +8,7 @@ Mode B (policy test): pass --bundle-dir containing policy_bundle.json/.npz.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
 import sys
@@ -30,6 +31,16 @@ if _REPO_ROOT not in sys.path:
 
 from puppersim import pupper_constants
 from puppersimMJX.pupper_brax_policy_bundle import BraxPolicyBundle
+
+_APRILTAG_LEVEL4_GRID = (
+    "11111111111",
+    "10001000001",
+    "10001011101",
+    "10000010001",
+    "10001010001",
+    "10000000001",
+    "11111111111",
+)
 
 
 # Mouse callback globals.
@@ -189,6 +200,123 @@ def _sample_lateral(rng: np.random.Generator, span: float, num_slots: int) -> fl
     return float(rng.uniform(-span, span))
 
 
+def _wall_id_from_normal(inward: np.ndarray) -> int:
+    nx = float(inward[0])
+    ny = float(inward[1])
+    if abs(ny) >= abs(nx):
+        return 0 if ny < 0.0 else 1
+    return 2 if nx < 0.0 else 3
+
+
+def _build_apriltag_face_candidates_from_grid(
+    *,
+    grid_rows: tuple[str, ...],
+    cell_size: float,
+    corner_margin: float,
+) -> list[dict]:
+    rows = len(grid_rows)
+    cols = len(grid_rows[0]) if rows > 0 else 0
+    if rows <= 0 or cols <= 0:
+        return []
+
+    occ = np.zeros((rows, cols), dtype=np.int32)
+    for r, row in enumerate(grid_rows):
+        if len(row) != cols:
+            raise ValueError("apriltag wall grid rows must all have equal length")
+        for c, ch in enumerate(row):
+            if ch not in ("0", "1"):
+                raise ValueError("apriltag wall grid must contain only '0' and '1'")
+            occ[r, c] = 1 if ch == "1" else 0
+
+    free_cells = [(r, c) for r in range(rows) for c in range(cols) if occ[r, c] == 0]
+    if not free_cells:
+        raise ValueError("apriltag wall grid has no free cells")
+    start = (rows // 2, cols // 2) if occ[rows // 2, cols // 2] == 0 else free_cells[0]
+    q = collections.deque([start])
+    seen = {start}
+    while q:
+        r, c = q.popleft()
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            rr = r + dr
+            cc = c + dc
+            if rr < 0 or rr >= rows or cc < 0 or cc >= cols:
+                continue
+            if occ[rr, cc] != 0:
+                continue
+            nxt = (rr, cc)
+            if nxt in seen:
+                continue
+            seen.add(nxt)
+            q.append(nxt)
+    if len(seen) != len(free_cells):
+        raise ValueError("apriltag wall grid free space is not fully connected")
+
+    x0 = 0.5 * (cols - 1)
+    y0 = 0.5 * (rows - 1)
+    half = 0.5 * float(cell_size)
+    half_len = half - max(0.0, float(corner_margin))
+    if half_len <= 1e-5:
+        raise ValueError("apriltag_wall_corner_margin too large for grid cell size")
+
+    candidates: list[dict] = []
+    face_dirs = (
+        (-1, 0, np.array([0.0, 1.0, 0.0], dtype=np.float64), np.array([1.0, 0.0], dtype=np.float64)),
+        (1, 0, np.array([0.0, -1.0, 0.0], dtype=np.float64), np.array([1.0, 0.0], dtype=np.float64)),
+        (0, -1, np.array([-1.0, 0.0, 0.0], dtype=np.float64), np.array([0.0, 1.0], dtype=np.float64)),
+        (0, 1, np.array([1.0, 0.0, 0.0], dtype=np.float64), np.array([0.0, 1.0], dtype=np.float64)),
+    )
+    face_id = 0
+    for r in range(rows):
+        for c in range(cols):
+            if occ[r, c] != 1:
+                continue
+            cx = (float(c) - x0) * float(cell_size)
+            cy = (y0 - float(r)) * float(cell_size)
+            for dr, dc, inward, tangent in face_dirs:
+                rr = r + dr
+                cc = c + dc
+                if rr < 0 or rr >= rows or cc < 0 or cc >= cols:
+                    continue
+                if occ[rr, cc] != 0:
+                    continue
+                center = np.array([cx + inward[0] * half, cy + inward[1] * half], dtype=np.float64)
+                candidates.append(
+                    {
+                        "face_id": int(face_id),
+                        "center": center,
+                        "inward": inward.copy(),
+                        "tangent": tangent.copy(),
+                        "half_length": float(half_len),
+                        "orient_wall_id": int(_wall_id_from_normal(inward)),
+                    }
+                )
+                face_id += 1
+    return candidates
+
+
+def _sample_apriltag_goal_xy_from_faces(
+    rng: np.random.Generator,
+    face_candidates: list[dict],
+    wall_num_slots: int,
+    wall_surface_inset: float,
+) -> Tuple[np.ndarray, int, int, np.ndarray]:
+    if not face_candidates:
+        raise ValueError("face_candidates is empty")
+    candidate = face_candidates[int(rng.integers(0, len(face_candidates)))]
+    half_len = float(candidate["half_length"])
+    if int(wall_num_slots) > 1:
+        slot = int(rng.integers(0, int(wall_num_slots)))
+        t = float(slot) / float(int(wall_num_slots) - 1)
+        lateral = (-1.0 + 2.0 * t) * half_len
+    else:
+        lateral = float(rng.uniform(-half_len, half_len))
+    center = np.asarray(candidate["center"], dtype=np.float64)
+    tangent = np.asarray(candidate["tangent"], dtype=np.float64)
+    inward = np.asarray(candidate["inward"], dtype=np.float64)
+    goal_xy = center + lateral * tangent + float(max(0.0, wall_surface_inset)) * inward[:2]
+    return goal_xy, int(candidate["face_id"]), int(candidate["orient_wall_id"]), inward
+
+
 def _sample_apriltag_goal_xy(
     rng: np.random.Generator,
     wall_offset: float,
@@ -320,6 +448,7 @@ def _camera_like_features(
     base_pos: np.ndarray,
     base_quat_wxyz: np.ndarray,
     tag_pos: np.ndarray,
+    wall_rects: Optional[list[tuple[float, float, float, float]]],
     front_camera_offset_in_body: np.ndarray,
     front_camera_forward_in_body: np.ndarray,
     front_camera_up_in_body: np.ndarray,
@@ -355,8 +484,16 @@ def _camera_like_features(
         step = 2.0 / max(bins - 1.0, 1.0)
         u = np.clip(np.round((u + 1.0) / step) * step - 1.0, -1.0, 1.0)
         v = np.clip(np.round((v + 1.0) / step) * step - 1.0, -1.0, 1.0)
-    visible = 1.0 if (z_cam > 0.0 and within) else 0.0
+    occluded = _is_occluded_by_room_walls_np(
+        cam_xy=cam_pos[:2],
+        tag_xy=tag_pos[:2],
+        wall_rects=wall_rects,
+    )
+    visible = 1.0 if (z_cam > 0.0 and within and (not occluded)) else 0.0
+    u = float(u * visible)
+    v = float(v * visible)
     centering = max(0.0, 1.0 - np.sqrt(min(1.0, float(u * u + v * v))))
+    centering = float(centering * visible)
     depth = max(rel_z, 1e-4)
     apparent_scale_raw = (2.0 * float(camera_obs_tag_half_size_m)) / (depth * tan_half)
     apparent_scale_raw = float(np.clip(apparent_scale_raw, 0.0, 1.0))
@@ -370,6 +507,61 @@ def _camera_like_features(
         "apparent_scale": float(apparent_scale),
         "apparent_scale_raw": float(apparent_scale_raw),
     }
+
+
+def _is_occluded_by_room_walls_np(
+    cam_xy: np.ndarray,
+    tag_xy: np.ndarray,
+    wall_rects: Optional[list[tuple[float, float, float, float]]],
+) -> bool:
+    if not wall_rects:
+        return False
+
+    x0 = float(cam_xy[0])
+    y0 = float(cam_xy[1])
+    x1 = float(tag_xy[0])
+    y1 = float(tag_xy[1])
+    dx = x1 - x0
+    dy = y1 - y0
+    eps = 1e-8
+    eps_t = 1e-3
+    big = 1e6
+
+    for xmin, ymin, xmax, ymax in wall_rects:
+        if xmin <= x0 <= xmax and ymin <= y0 <= ymax:
+            return True
+
+        tmin = -big
+        tmax = big
+        if abs(dx) < eps:
+            if x0 < xmin or x0 > xmax:
+                continue
+        else:
+            tx1 = (xmin - x0) / dx
+            tx2 = (xmax - x0) / dx
+            tmin = max(tmin, min(tx1, tx2))
+            tmax = min(tmax, max(tx1, tx2))
+
+        if abs(dy) < eps:
+            if y0 < ymin or y0 > ymax:
+                continue
+        else:
+            ty1 = (ymin - y0) / dy
+            ty2 = (ymax - y0) / dy
+            tmin = max(tmin, min(ty1, ty2))
+            tmax = min(tmax, max(ty1, ty2))
+
+        if tmax < 0.0:
+            continue
+        if tmin > tmax:
+            continue
+
+        hit_t = tmin if tmin >= 0.0 else tmax
+        if hit_t < 0.0:
+            continue
+        if eps_t <= hit_t <= (1.0 - eps_t):
+            return True
+    return False
 
 
 def _forward_clearance_from_room(
@@ -418,6 +610,86 @@ def _forward_clearance_from_room(
     max_d = max(1e-3, float(max_clearance_m))
     dist = min(dist, max_d)
     return float(np.clip(dist / max_d, 0.0, 1.0))
+
+
+def _build_room_wall_rects(model: mj.MjModel) -> list[tuple[float, float, float, float]]:
+    rects: list[tuple[float, float, float, float]] = []
+    for gid in range(int(model.ngeom)):
+        name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_GEOM, gid)
+        if not name or not str(name).startswith("room_wall"):
+            continue
+        # Box geoms encode XY half extents in geom_size[:, :2].
+        sx = float(abs(model.geom_size[gid, 0]))
+        sy = float(abs(model.geom_size[gid, 1]))
+        if sx <= 1e-6 or sy <= 1e-6:
+            continue
+        cx = float(model.geom_pos[gid, 0])
+        cy = float(model.geom_pos[gid, 1])
+        rects.append((cx - sx, cy - sy, cx + sx, cy + sy))
+    return rects
+
+
+def _forward_clearance_from_rects(
+    cam_pos: np.ndarray,
+    cam_fwd: np.ndarray,
+    wall_rects: list[tuple[float, float, float, float]],
+    max_clearance_m: float,
+) -> float:
+    if not wall_rects:
+        return 1.0
+
+    x = float(cam_pos[0])
+    y = float(cam_pos[1])
+    fx = float(cam_fwd[0])
+    fy = float(cam_fwd[1])
+    ray_norm = float(np.hypot(fx, fy))
+    if ray_norm <= 1e-8:
+        return 1.0
+    fx /= ray_norm
+    fy /= ray_norm
+
+    eps = 1e-8
+    max_d = max(1e-3, float(max_clearance_m))
+    best_t = max_d
+
+    for xmin, ymin, xmax, ymax in wall_rects:
+        # If camera starts inside any wall volume, treat as fully blocked.
+        if xmin <= x <= xmax and ymin <= y <= ymax:
+            return 0.0
+
+        tmin = -1e12
+        tmax = 1e12
+
+        if abs(fx) < eps:
+            if x < xmin or x > xmax:
+                continue
+        else:
+            tx1 = (xmin - x) / fx
+            tx2 = (xmax - x) / fx
+            tmin = max(tmin, min(tx1, tx2))
+            tmax = min(tmax, max(tx1, tx2))
+
+        if abs(fy) < eps:
+            if y < ymin or y > ymax:
+                continue
+        else:
+            ty1 = (ymin - y) / fy
+            ty2 = (ymax - y) / fy
+            tmin = max(tmin, min(ty1, ty2))
+            tmax = min(tmax, max(ty1, ty2))
+
+        if tmax < 0.0:
+            continue
+        if tmin > tmax:
+            continue
+
+        hit_t = tmin if tmin >= 0.0 else tmax
+        if hit_t < 0.0:
+            continue
+        if hit_t < best_t:
+            best_t = hit_t
+
+    return float(np.clip(best_t / max_d, 0.0, 1.0))
 
 
 def main() -> None:
@@ -674,10 +946,26 @@ def main() -> None:
         env_cfg.get("apriltag_collect_close_forward_cos_threshold", 0.20)
     )
     tag_inactive_xyz = np.array([float(args.tag_inactive_x), float(args.tag_inactive_y), float(args.tag_inactive_z)], dtype=np.float64)
-    tag_wall_surface_inset = 0.004
+    tag_wall_layout = str(env_cfg.get("apriltag_wall_layout", "single_room")).strip().lower()
+    tag_wall_cell_size = float(env_cfg.get("apriltag_wall_cell_size", 0.6))
+    tag_wall_corner_margin = float(env_cfg.get("apriltag_wall_corner_margin", 0.12))
+    tag_wall_surface_inset = float(max(0.0, env_cfg.get("apriltag_wall_surface_inset", 0.004)))
+    tag_face_candidates: list[dict] = []
+    if tag_wall_layout in {"level4_mult_room", "level4_multi_room", "mult_room_level4"}:
+        tag_face_candidates = _build_apriltag_face_candidates_from_grid(
+            grid_rows=_APRILTAG_LEVEL4_GRID,
+            cell_size=tag_wall_cell_size,
+            corner_margin=tag_wall_corner_margin,
+        )
+        print(
+            f"info: apriltag wall layout={tag_wall_layout} face_candidates={len(tag_face_candidates)} "
+            f"cell_size={tag_wall_cell_size:.3f} corner_margin={tag_wall_corner_margin:.3f}"
+        )
     tag_active = good_geom_id >= 0
     tag_collect_count = 0
     tag_episode_collected = 0
+    tag_wall_ids_seen: set[int] = set()
+    room_wall_rects = _build_room_wall_rects(model)
 
     wall_inner_pos = None
     try:
@@ -703,16 +991,25 @@ def main() -> None:
     except Exception:
         wall_inner_pos = None
 
-    def _resample_and_apply_tag_pose() -> Optional[Tuple[np.ndarray, int, np.ndarray]]:
+    def _resample_and_apply_tag_pose() -> Optional[Tuple[np.ndarray, int, int, np.ndarray]]:
         if not tag_randomize_on_reset or good_geom_id < 0:
             return None
-        goal_xy, wall_id, inward = _sample_apriltag_goal_xy(
-            tag_rng,
-            wall_offset=tag_wall_offset,
-            wall_span=tag_wall_span,
-            front_wall_only=tag_front_only,
-            wall_num_slots=tag_num_slots,
-        )
+        if tag_face_candidates:
+            goal_xy, wall_id, orient_wall_id, inward = _sample_apriltag_goal_xy_from_faces(
+                tag_rng,
+                face_candidates=tag_face_candidates,
+                wall_num_slots=tag_num_slots,
+                wall_surface_inset=tag_wall_surface_inset,
+            )
+        else:
+            goal_xy, orient_wall_id, inward = _sample_apriltag_goal_xy(
+                tag_rng,
+                wall_offset=tag_wall_offset,
+                wall_span=tag_wall_span,
+                front_wall_only=tag_front_only,
+                wall_num_slots=tag_num_slots,
+            )
+            wall_id = int(orient_wall_id)
         _apply_apriltag_pose(
             model=model,
             data=data,
@@ -723,24 +1020,26 @@ def main() -> None:
             good_mesh_quat=good_mesh_quat,
             bad_mesh_quat=bad_mesh_quat,
             use_bad_tag=tag_use_bad,
-            good_wall_id=wall_id,
+            good_wall_id=orient_wall_id,
             good_xy=goal_xy,
             tag_height=tag_height,
             wall_offset=tag_wall_offset,
             wall_span=tag_wall_span,
             wall_surface_inset=tag_wall_surface_inset,
-            wall_inner_pos=wall_inner_pos,
+            wall_inner_pos=(None if tag_face_candidates else wall_inner_pos),
         )
-        return goal_xy, wall_id, inward
+        return goal_xy, wall_id, orient_wall_id, inward
 
     tag_init = _resample_and_apply_tag_pose()
     if tag_init is not None:
-        goal_xy, wall_id, _ = tag_init
+        goal_xy, wall_id, orient_wall_id, _ = tag_init
+        tag_wall_ids_seen.add(int(wall_id))
         gpos = np.asarray(model.geom_pos[good_geom_id], dtype=np.float64)
         gquat = np.asarray(model.geom_quat[good_geom_id], dtype=np.float64)
         gnorm = _geom_normal_from_quat_wxyz(gquat)
         print(
-            f"[tag] init wall_id={wall_id} sampled=({goal_xy[0]:+.3f},{goal_xy[1]:+.3f},{tag_height:+.3f}) "
+            f"[tag] init wall_id={wall_id} orient_wall_id={orient_wall_id} "
+            f"sampled=({goal_xy[0]:+.3f},{goal_xy[1]:+.3f},{tag_height:+.3f}) "
             f"applied=({gpos[0]:+.3f},{gpos[1]:+.3f},{gpos[2]:+.3f}) "
             f"normal=({gnorm[0]:+.3f},{gnorm[1]:+.3f},{gnorm[2]:+.3f})"
         )
@@ -798,12 +1097,13 @@ def main() -> None:
             tag_new = _resample_and_apply_tag_pose()
             tag_active = good_geom_id >= 0
             if tag_new is not None:
-                goal_xy_r, wall_id_r, _ = tag_new
+                goal_xy_r, wall_id_r, orient_wall_id_r, _ = tag_new
+                tag_wall_ids_seen.add(int(wall_id_r))
                 gpos = np.asarray(model.geom_pos[good_geom_id], dtype=np.float64)
                 gquat = np.asarray(model.geom_quat[good_geom_id], dtype=np.float64)
                 gnorm = _geom_normal_from_quat_wxyz(gquat)
                 print(
-                    f"[tag] reset t={data.time:.2f}s wall_id={wall_id_r} "
+                    f"[tag] reset t={data.time:.2f}s wall_id={wall_id_r} orient_wall_id={orient_wall_id_r} "
                     f"sampled=({goal_xy_r[0]:+.3f},{goal_xy_r[1]:+.3f},{tag_height:+.3f}) "
                     f"applied=({gpos[0]:+.3f},{gpos[1]:+.3f},{gpos[2]:+.3f}) "
                     f"normal=({gnorm[0]:+.3f},{gnorm[1]:+.3f},{gnorm[2]:+.3f})"
@@ -863,6 +1163,7 @@ def main() -> None:
                     base_pos=base_pos,
                     base_quat_wxyz=base_quat,
                     tag_pos=good_pos,
+                    wall_rects=room_wall_rects,
                     front_camera_offset_in_body=front_camera_offset_in_body,
                     front_camera_forward_in_body=front_camera_forward_in_body,
                     front_camera_up_in_body=front_camera_up_in_body,
@@ -889,12 +1190,13 @@ def main() -> None:
                     tag_new = _resample_and_apply_tag_pose()
                     tag_active = good_geom_id >= 0
                     if tag_new is not None:
-                        goal_xy_c, wall_id_c, _ = tag_new
+                        goal_xy_c, wall_id_c, orient_wall_id_c, _ = tag_new
+                        tag_wall_ids_seen.add(int(wall_id_c))
                         gpos = np.asarray(model.geom_pos[good_geom_id], dtype=np.float64)
                         gquat = np.asarray(model.geom_quat[good_geom_id], dtype=np.float64)
                         gnorm = _geom_normal_from_quat_wxyz(gquat)
                         print(
-                            f"[tag] respawn t={data.time:.2f}s wall_id={wall_id_c} "
+                            f"[tag] respawn t={data.time:.2f}s wall_id={wall_id_c} orient_wall_id={orient_wall_id_c} "
                             f"sampled=({goal_xy_c[0]:+.3f},{goal_xy_c[1]:+.3f},{tag_height:+.3f}) "
                             f"applied=({gpos[0]:+.3f},{gpos[1]:+.3f},{gpos[2]:+.3f}) "
                             f"normal=({gnorm[0]:+.3f},{gnorm[1]:+.3f},{gnorm[2]:+.3f}) "
@@ -991,6 +1293,7 @@ def main() -> None:
                     base_pos=base_pos,
                     base_quat_wxyz=base_quat,
                     tag_pos=good_pos,
+                    wall_rects=room_wall_rects,
                     front_camera_offset_in_body=front_camera_offset_in_body,
                     front_camera_forward_in_body=front_camera_forward_in_body,
                     front_camera_up_in_body=front_camera_up_in_body,
@@ -1016,6 +1319,7 @@ def main() -> None:
                     base_pos=base_pos,
                     base_quat_wxyz=base_quat,
                     tag_pos=bad_pos,
+                    wall_rects=room_wall_rects,
                     front_camera_offset_in_body=front_camera_offset_in_body,
                     front_camera_forward_in_body=front_camera_forward_in_body,
                     front_camera_up_in_body=front_camera_up_in_body,
@@ -1039,12 +1343,20 @@ def main() -> None:
                 cam_pos = base_pos + _quat_rotate_wxyz(base_quat, front_camera_offset_in_body)
                 cam_fwd = _quat_rotate_wxyz(base_quat, front_camera_forward_in_body)
                 cam_fwd = cam_fwd / max(1e-6, float(np.linalg.norm(cam_fwd)))
-                fclr = _forward_clearance_from_room(
-                    cam_pos=cam_pos,
-                    cam_fwd=cam_fwd,
-                    wall_inner_pos=wall_inner_pos,
-                    max_clearance_m=camera_obs_max_clearance_m,
-                )
+                if room_wall_rects:
+                    fclr = _forward_clearance_from_rects(
+                        cam_pos=cam_pos,
+                        cam_fwd=cam_fwd,
+                        wall_rects=room_wall_rects,
+                        max_clearance_m=camera_obs_max_clearance_m,
+                    )
+                else:
+                    fclr = _forward_clearance_from_room(
+                        cam_pos=cam_pos,
+                        cam_fwd=cam_fwd,
+                        wall_inner_pos=wall_inner_pos,
+                        max_clearance_m=camera_obs_max_clearance_m,
+                    )
                 camera_feat_lines.append(f"FCLR {fclr:.2f}")
 
         overlay_lines = [tag_status]
@@ -1067,6 +1379,8 @@ def main() -> None:
         glfw.swap_buffers(window)
         glfw.poll_events()
 
+    if tag_wall_ids_seen:
+        print(f"[tag] wall_ids_seen={sorted(tag_wall_ids_seen)}")
     if cv2 is not None:
         cv2.destroyAllWindows()
     glfw.terminate()

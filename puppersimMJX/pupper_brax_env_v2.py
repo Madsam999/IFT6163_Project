@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import importlib
 import json
 import os
@@ -108,6 +109,115 @@ class PupperV2BraxEnv:
     pass
 
 
+_APRILTAG_LEVEL4_GRID: Tuple[str, ...] = (
+    "11111111111",
+    "10001000001",
+    "10001011101",
+    "10000010001",
+    "10001010001",
+    "10000000001",
+    "11111111111",
+)
+
+
+def _build_apriltag_face_candidates_from_grid(
+    grid_rows: Tuple[str, ...],
+    *,
+    cell_size: float,
+    corner_margin: float,
+) -> Dict[str, np.ndarray]:
+    """Build free-facing wall segments from an occupancy grid."""
+
+    if not grid_rows:
+        return {"centers": np.zeros((0, 2), dtype=np.float32), "tangents": np.zeros((0, 2), dtype=np.float32), "normals": np.zeros((0, 3), dtype=np.float32), "half_lengths": np.zeros((0,), dtype=np.float32)}
+
+    rows = len(grid_rows)
+    cols = len(grid_rows[0])
+    occ = np.zeros((rows, cols), dtype=np.int32)
+    for r, row in enumerate(grid_rows):
+        if len(row) != cols:
+            raise ValueError("apriltag wall grid rows must all have equal length")
+        for c, ch in enumerate(row):
+            if ch not in ("0", "1"):
+                raise ValueError("apriltag wall grid must contain only '0' and '1'")
+            occ[r, c] = 1 if ch == "1" else 0
+
+    free_cells = [(r, c) for r in range(rows) for c in range(cols) if occ[r, c] == 0]
+    if not free_cells:
+        raise ValueError("apriltag wall grid has no free cells")
+
+    center_rc = (rows // 2, cols // 2)
+    if occ[center_rc] == 0:
+        start = center_rc
+    else:
+        start = free_cells[0]
+    q = collections.deque([start])
+    seen = {start}
+    while q:
+        r, c = q.popleft()
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            rr = r + dr
+            cc = c + dc
+            if rr < 0 or rr >= rows or cc < 0 or cc >= cols:
+                continue
+            if occ[rr, cc] != 0:
+                continue
+            nxt = (rr, cc)
+            if nxt in seen:
+                continue
+            seen.add(nxt)
+            q.append(nxt)
+    if len(seen) != len(free_cells):
+        raise ValueError("apriltag wall grid free space is not fully connected")
+
+    x0 = 0.5 * (cols - 1)
+    y0 = 0.5 * (rows - 1)
+    half = 0.5 * float(cell_size)
+    margin = max(0.0, float(corner_margin))
+    half_len = half - margin
+    if half_len <= 1e-5:
+        raise ValueError("apriltag_wall_corner_margin too large for grid cell size")
+
+    centers: list[list[float]] = []
+    tangents: list[list[float]] = []
+    normals: list[list[float]] = []
+    half_lengths: list[float] = []
+
+    face_dirs = (
+        (-1, 0, (0.0, 1.0), (1.0, 0.0)),   # north
+        (1, 0, (0.0, -1.0), (1.0, 0.0)),   # south
+        (0, -1, (-1.0, 0.0), (0.0, 1.0)),  # west
+        (0, 1, (1.0, 0.0), (0.0, 1.0)),    # east
+    )
+    for r in range(rows):
+        for c in range(cols):
+            if occ[r, c] != 1:
+                continue
+            cx = (float(c) - x0) * float(cell_size)
+            cy = (y0 - float(r)) * float(cell_size)
+            for dr, dc, n2, t2 in face_dirs:
+                rr = r + dr
+                cc = c + dc
+                if rr < 0 or rr >= rows or cc < 0 or cc >= cols:
+                    continue
+                if occ[rr, cc] != 0:
+                    continue
+                centers.append([cx + n2[0] * half, cy + n2[1] * half])
+                tangents.append([t2[0], t2[1]])
+                normals.append([n2[0], n2[1], 0.0])
+                half_lengths.append(half_len)
+
+    if not centers:
+        raise ValueError("apriltag wall grid produced no valid wall faces")
+
+    return {
+        "centers": np.asarray(centers, dtype=np.float32),
+        "tangents": np.asarray(tangents, dtype=np.float32),
+        "normals": np.asarray(normals, dtype=np.float32),
+        "half_lengths": np.asarray(half_lengths, dtype=np.float32),
+    }
+
+
 def _build_env_class():
     import jax
     from jax import numpy as jp
@@ -189,6 +299,10 @@ def _build_env_class():
             apriltag_randomize_good_goal_on_reset: bool = False,
             apriltag_randomize_front_wall_only: bool = True,
             apriltag_wall_num_slots: int = 0,
+            apriltag_wall_layout: str = "single_room",
+            apriltag_wall_cell_size: float = 0.6,
+            apriltag_wall_corner_margin: float = 0.12,
+            apriltag_wall_surface_inset: float = 0.0,
             apriltag_end_episode_on_collect: bool = True,
             apriltag_end_episode_on_all_collected: bool = False,
             apriltag_deactivate_on_collect: bool = True,
@@ -211,6 +325,10 @@ def _build_env_class():
             camera_obs_tag_half_size_m: float = 0.20,
             camera_obs_include_forward_clearance: bool = False,
             camera_obs_max_clearance_m: float = 3.0,
+            apriltag_stuck_termination_enabled: bool = False,
+            apriltag_stuck_speed_threshold_mps: float = 0.03,
+            apriltag_stuck_forward_clearance_threshold: float = 0.05,
+            apriltag_stuck_steps_threshold: int = 120,
             stand_still_command_threshold: float = 0.05,
             tracking_sigma: float = 0.25,
             feet_air_time_minimum: float = 0.10,
@@ -343,6 +461,10 @@ def _build_env_class():
             self._apriltag_randomize_good_goal_on_reset = bool(apriltag_randomize_good_goal_on_reset)
             self._apriltag_randomize_front_wall_only = bool(apriltag_randomize_front_wall_only)
             self._apriltag_wall_num_slots = int(max(0, apriltag_wall_num_slots))
+            self._apriltag_wall_layout = str(apriltag_wall_layout).strip().lower()
+            self._apriltag_wall_cell_size = float(max(1e-4, apriltag_wall_cell_size))
+            self._apriltag_wall_corner_margin = float(max(0.0, apriltag_wall_corner_margin))
+            self._apriltag_wall_surface_inset = float(max(0.0, apriltag_wall_surface_inset))
             self._apriltag_end_episode_on_collect = bool(apriltag_end_episode_on_collect)
             self._apriltag_end_episode_on_all_collected = bool(apriltag_end_episode_on_all_collected)
             self._apriltag_deactivate_on_collect = bool(apriltag_deactivate_on_collect)
@@ -369,6 +491,12 @@ def _build_env_class():
             self._camera_obs_tag_half_size_m = float(max(1e-6, camera_obs_tag_half_size_m))
             self._camera_obs_include_forward_clearance = bool(camera_obs_include_forward_clearance)
             self._camera_obs_max_clearance_m = float(max(1e-3, camera_obs_max_clearance_m))
+            self._apriltag_stuck_termination_enabled = bool(apriltag_stuck_termination_enabled)
+            self._apriltag_stuck_speed_threshold_mps = float(max(0.0, apriltag_stuck_speed_threshold_mps))
+            self._apriltag_stuck_forward_clearance_threshold = float(
+                max(0.0, min(1.0, apriltag_stuck_forward_clearance_threshold))
+            )
+            self._apriltag_stuck_steps_threshold = int(max(1, apriltag_stuck_steps_threshold))
             fov_rad = np.deg2rad(self._camera_obs_fov_deg)
             self._camera_obs_tan_half_fov = float(np.tan(0.5 * fov_rad))
             if self._high_level_obs_mode not in ("state", "state_full", "camera", "camera_nopriv"):
@@ -378,6 +506,25 @@ def _build_env_class():
                 )
             if self._high_level_obs_mode == "state_full":
                 self._exclude_xy_from_obs = False
+
+            self._apriltag_face_centers = None
+            self._apriltag_face_tangents = None
+            self._apriltag_face_normals = None
+            self._apriltag_face_half_lengths = None
+            self._apriltag_face_count = 0
+            if self._apriltag_wall_layout in {"level4_mult_room", "level4_multi_room", "mult_room_level4"}:
+                face_data = _build_apriltag_face_candidates_from_grid(
+                    _APRILTAG_LEVEL4_GRID,
+                    cell_size=self._apriltag_wall_cell_size,
+                    corner_margin=self._apriltag_wall_corner_margin,
+                )
+                self._apriltag_face_centers = jp.array(face_data["centers"], dtype=jp.float32)
+                self._apriltag_face_tangents = jp.array(face_data["tangents"], dtype=jp.float32)
+                self._apriltag_face_normals = jp.array(face_data["normals"], dtype=jp.float32)
+                self._apriltag_face_half_lengths = jp.array(face_data["half_lengths"], dtype=jp.float32)
+                self._apriltag_face_count = int(face_data["centers"].shape[0])
+                if self._apriltag_face_count <= 0:
+                    raise ValueError("apriltag wall layout requested but no valid wall faces were built")
 
             simple_forward_cfg: Dict[str, Any] = {
                 "weight": float(reward_weight),
@@ -600,6 +747,8 @@ def _build_env_class():
             self._room_x_max = None
             self._room_y_min = None
             self._room_y_max = None
+            self._room_wall_rect_count = 0
+            self._room_wall_rects_xyxy = jp.zeros((0, 4), dtype=self._default_q.dtype)
             try:
                 import mujoco as _mj
 
@@ -622,11 +771,31 @@ def _build_env_class():
                         self._room_y_max = back_cy - back_t
                         self._room_x_min = left_cx + left_t
                         self._room_x_max = right_cx - right_t
+
+                    # Collect all static room wall rectangles (outer + interior).
+                    rects_xyxy: list[list[float]] = []
+                    ngeom = int(getattr(mj_model, "ngeom", 0))
+                    for gid in range(ngeom):
+                        gname = _mj.mj_id2name(mj_model, _mj.mjtObj.mjOBJ_GEOM, gid)
+                        if not gname or not str(gname).startswith("room_wall"):
+                            continue
+                        sx = float(abs(mj_model.geom_size[gid, 0]))
+                        sy = float(abs(mj_model.geom_size[gid, 1]))
+                        if sx <= 1e-8 or sy <= 1e-8:
+                            continue
+                        cx = float(mj_model.geom_pos[gid, 0])
+                        cy = float(mj_model.geom_pos[gid, 1])
+                        rects_xyxy.append([cx - sx, cy - sy, cx + sx, cy + sy])
+                    if rects_xyxy:
+                        self._room_wall_rect_count = int(len(rects_xyxy))
+                        self._room_wall_rects_xyxy = jp.array(np.asarray(rects_xyxy, dtype=np.float32))
             except Exception:
                 self._room_x_min = None
                 self._room_x_max = None
                 self._room_y_min = None
                 self._room_y_max = None
+                self._room_wall_rect_count = 0
+                self._room_wall_rects_xyxy = jp.zeros((0, 4), dtype=self._default_q.dtype)
 
             def _quat_mul_np(a: np.ndarray, b: np.ndarray) -> np.ndarray:
                 aw, ax, ay, az = a
@@ -866,6 +1035,23 @@ def _build_env_class():
 
         def _sample_apriltag_wall_goal(self, rng: jp.ndarray, dtype):
             """Sample one of four room walls and return a tag anchor on that wall."""
+            if self._apriltag_face_count > 0:
+                rng, fkey, tkey = jax.random.split(rng, 3)
+                face_idx = jax.random.randint(fkey, shape=(), minval=0, maxval=self._apriltag_face_count)
+                center = self._apriltag_face_centers[face_idx].astype(dtype)
+                tangent = self._apriltag_face_tangents[face_idx].astype(dtype)
+                normal = self._apriltag_face_normals[face_idx].astype(dtype)
+                half_len = self._apriltag_face_half_lengths[face_idx].astype(dtype)
+                if self._apriltag_wall_num_slots > 1:
+                    slot_idx = jax.random.randint(tkey, shape=(), minval=0, maxval=self._apriltag_wall_num_slots)
+                    t = slot_idx.astype(dtype) / jp.asarray(float(self._apriltag_wall_num_slots - 1), dtype=dtype)
+                    lateral = (-1.0 + 2.0 * t) * half_len
+                else:
+                    lateral = jax.random.uniform(tkey, shape=(), minval=-half_len, maxval=half_len)
+                inset = jp.asarray(self._apriltag_wall_surface_inset, dtype=dtype)
+                goal_xy = center + lateral * tangent + inset * normal[:2]
+                return rng, goal_xy, face_idx.astype(jp.int32), normal
+
             rng, wkey, lkey = jax.random.split(rng, 3)
             wall_id = jax.random.randint(wkey, shape=(), minval=0, maxval=4)
             if self._apriltag_wall_num_slots > 1:
@@ -1038,8 +1224,16 @@ def _build_env_class():
                 v = jp.round((v + 1.0) / step) * step - 1.0
                 u = jp.clip(u, -1.0, 1.0)
                 v = jp.clip(v, -1.0, 1.0)
-            visible = ((z_cam > 0.0) & within).astype(dtype)
+            occluded = self._is_occluded_by_room_walls(
+                cam_xy=cam_pos[:2].astype(dtype),
+                tag_xy=tag_pos[:2].astype(dtype),
+                dtype=dtype,
+            )
+            visible = ((z_cam > 0.0) & within & (~occluded)).astype(dtype)
+            u = u * visible
+            v = v * visible
             centering = jp.maximum(0.0, 1.0 - jp.sqrt(jp.minimum(1.0, u * u + v * v)))
+            centering = centering * visible
             dist_norm = 1.0 / (1.0 + dist / jp.asarray(self._camera_obs_distance_scale, dtype=dtype))
             depth = jp.maximum(rel_z, 1e-4)
             tag_half = jp.asarray(self._camera_obs_tag_half_size_m, dtype=dtype)
@@ -1059,7 +1253,110 @@ def _build_env_class():
                 "apparent_scale_raw": apparent_scale_raw,
             }
 
+        def _is_occluded_by_room_walls(self, cam_xy: Any, tag_xy: Any, dtype: Any):
+            if self._room_wall_rect_count <= 0:
+                return jp.asarray(False)
+
+            rects = self._room_wall_rects_xyxy.astype(dtype)
+            x0 = cam_xy[0]
+            y0 = cam_xy[1]
+            x1 = tag_xy[0]
+            y1 = tag_xy[1]
+            dx = x1 - x0
+            dy = y1 - y0
+
+            xmin = rects[:, 0]
+            ymin = rects[:, 1]
+            xmax = rects[:, 2]
+            ymax = rects[:, 3]
+
+            cam_inside = jp.any((x0 >= xmin) & (x0 <= xmax) & (y0 >= ymin) & (y0 <= ymax))
+            eps = jp.asarray(1e-8, dtype=dtype)
+            big = jp.asarray(1e6, dtype=dtype)
+
+            dx_ok = jp.abs(dx) > eps
+            dy_ok = jp.abs(dy) > eps
+
+            tx1 = (xmin - x0) / jp.where(dx_ok, dx, 1.0)
+            tx2 = (xmax - x0) / jp.where(dx_ok, dx, 1.0)
+            tmin_x = jp.where(dx_ok, jp.minimum(tx1, tx2), -big)
+            tmax_x = jp.where(dx_ok, jp.maximum(tx1, tx2), big)
+            x_in_slab = (x0 >= xmin) & (x0 <= xmax)
+            tmin_x = jp.where(dx_ok | x_in_slab, tmin_x, big)
+            tmax_x = jp.where(dx_ok | x_in_slab, tmax_x, -big)
+
+            ty1 = (ymin - y0) / jp.where(dy_ok, dy, 1.0)
+            ty2 = (ymax - y0) / jp.where(dy_ok, dy, 1.0)
+            tmin_y = jp.where(dy_ok, jp.minimum(ty1, ty2), -big)
+            tmax_y = jp.where(dy_ok, jp.maximum(ty1, ty2), big)
+            y_in_slab = (y0 >= ymin) & (y0 <= ymax)
+            tmin_y = jp.where(dy_ok | y_in_slab, tmin_y, big)
+            tmax_y = jp.where(dy_ok | y_in_slab, tmax_y, -big)
+
+            t_enter = jp.maximum(tmin_x, tmin_y)
+            t_exit = jp.minimum(tmax_x, tmax_y)
+            # [0, 1] segment intersection; ignore endpoint self-hit at tag surface.
+            eps_t = jp.asarray(1e-3, dtype=dtype)
+            hit = (t_exit >= eps_t) & (t_enter <= t_exit) & (t_enter >= 0.0) & (t_enter <= (1.0 - eps_t))
+            return cam_inside | jp.any(hit)
+
         def _forward_clearance_feature(self, pipeline_state: Any, dtype: Any):
+            if self._room_wall_rect_count > 0:
+                base_pos = pipeline_state.x.pos[self._torso_idx].astype(dtype)
+                base_rot = pipeline_state.x.rot[self._torso_idx].astype(dtype)
+                cam_pos = base_pos + math.rotate(self._front_camera_offset_in_body.astype(dtype), base_rot)
+                cam_fwd = math.rotate(self._front_camera_forward_in_body.astype(dtype), base_rot)
+                cam_fwd = cam_fwd / jp.maximum(jp.linalg.norm(cam_fwd), 1e-6)
+
+                x = cam_pos[0]
+                y = cam_pos[1]
+                fx = cam_fwd[0]
+                fy = cam_fwd[1]
+                norm = jp.maximum(jp.sqrt(fx * fx + fy * fy), 1e-6)
+                fx = fx / norm
+                fy = fy / norm
+
+                rects = self._room_wall_rects_xyxy.astype(dtype)
+                xmin = rects[:, 0]
+                ymin = rects[:, 1]
+                xmax = rects[:, 2]
+                ymax = rects[:, 3]
+
+                inside_any = jp.any((x >= xmin) & (x <= xmax) & (y >= ymin) & (y <= ymax))
+                eps = jp.asarray(1e-8, dtype=dtype)
+                big = jp.asarray(1e6, dtype=dtype)
+
+                fx_ok = jp.abs(fx) > eps
+                fy_ok = jp.abs(fy) > eps
+
+                tx1 = (xmin - x) / jp.where(fx_ok, fx, 1.0)
+                tx2 = (xmax - x) / jp.where(fx_ok, fx, 1.0)
+                tmin_x = jp.where(fx_ok, jp.minimum(tx1, tx2), -big)
+                tmax_x = jp.where(fx_ok, jp.maximum(tx1, tx2), big)
+                x_in_slab = (x >= xmin) & (x <= xmax)
+                tmin_x = jp.where(fx_ok | x_in_slab, tmin_x, big)
+                tmax_x = jp.where(fx_ok | x_in_slab, tmax_x, -big)
+
+                ty1 = (ymin - y) / jp.where(fy_ok, fy, 1.0)
+                ty2 = (ymax - y) / jp.where(fy_ok, fy, 1.0)
+                tmin_y = jp.where(fy_ok, jp.minimum(ty1, ty2), -big)
+                tmax_y = jp.where(fy_ok, jp.maximum(ty1, ty2), big)
+                y_in_slab = (y >= ymin) & (y <= ymax)
+                tmin_y = jp.where(fy_ok | y_in_slab, tmin_y, big)
+                tmax_y = jp.where(fy_ok | y_in_slab, tmax_y, -big)
+
+                tmin = jp.maximum(tmin_x, tmin_y)
+                tmax = jp.minimum(tmax_x, tmax_y)
+                hit_valid = (tmax >= 0.0) & (tmin <= tmax)
+                hit_t = jp.where(tmin >= 0.0, tmin, tmax)
+                hit_t = jp.where(hit_valid & (hit_t >= 0.0), hit_t, big)
+
+                best_t = jp.min(hit_t)
+                max_d = jp.asarray(self._camera_obs_max_clearance_m, dtype=dtype)
+                dist = jp.minimum(best_t, max_d)
+                clearance = jp.clip(dist / jp.maximum(max_d, 1e-6), 0.0, 1.0)
+                return jp.where(inside_any, jp.asarray(0.0, dtype=dtype), clearance)
+
             if (
                 self._room_x_min is None
                 or self._room_x_max is None
@@ -1466,6 +1763,8 @@ def _build_env_class():
                 "last_good_v": zero,
                 "steps_since_good_seen": zero,
                 "collect_streak": zero,
+                "stuck_steps": zero,
+                "stuck_termination": zero,
                 "tracking_lin_error": zero,
                 "tracking_yaw_error": zero,
                 "apriltag_visible": apriltag_features["visible"],
@@ -1500,6 +1799,7 @@ def _build_env_class():
                 "last_good_v": zero.astype(obs.dtype),
                 "steps_since_good_seen": zero.astype(obs.dtype),
                 "collect_streak": zero.astype(obs.dtype),
+                "stuck_steps": jp.asarray(0, dtype=jp.int32),
                 "apriltag_wall_id": apriltag_wall_id,
                 "apriltag_wall_normal": apriltag_wall_normal.astype(obs.dtype),
                 "apriltag_active": jp.asarray(1.0, dtype=obs.dtype),
@@ -1592,6 +1892,20 @@ def _build_env_class():
                 done = jp.where(episode_step <= self._termination_grace_steps, jp.zeros_like(raw_done), raw_done)
             else:
                 done = raw_done
+            stuck_steps_prev = state.info.get("stuck_steps", jp.asarray(0, dtype=jp.int32))
+            stuck_steps = stuck_steps_prev
+            stuck_termination = jp.asarray(0.0, dtype=done.dtype)
+            if self._apriltag_stuck_termination_enabled and self._reward_mode == "apriltag_walls":
+                forward_clearance_now = self._forward_clearance_feature(pipeline_state=pipeline_state, dtype=done.dtype)
+                planar_speed = jp.linalg.norm(velocity[:2].astype(done.dtype))
+                slow_now = planar_speed < jp.asarray(self._apriltag_stuck_speed_threshold_mps, dtype=done.dtype)
+                near_wall_now = forward_clearance_now < jp.asarray(
+                    self._apriltag_stuck_forward_clearance_threshold, dtype=done.dtype
+                )
+                stuck_now = slow_now & near_wall_now
+                stuck_steps = jp.where(stuck_now, stuck_steps_prev + 1, jp.asarray(0, dtype=jp.int32))
+                stuck_termination = (stuck_steps >= self._apriltag_stuck_steps_threshold).astype(done.dtype)
+                done = jp.maximum(done, stuck_termination)
 
             last_action = state.info.get("last_action", jp.zeros_like(action))
             last_last_action = state.info.get("last_last_action", jp.zeros_like(action))
@@ -1972,6 +2286,8 @@ def _build_env_class():
                 last_good_v=last_good_v,
                 steps_since_good_seen=steps_since_good_seen,
                 collect_streak=collect_streak,
+                stuck_steps=stuck_steps.astype(reward.dtype),
+                stuck_termination=stuck_termination,
                 tracking_lin_error=tracking_lin_error,
                 tracking_yaw_error=tracking_yaw_error,
                 apriltag_visible=apriltag_features["visible"],
@@ -2015,6 +2331,7 @@ def _build_env_class():
             info["last_good_v"] = last_good_v
             info["steps_since_good_seen"] = steps_since_good_seen
             info["collect_streak"] = collect_streak
+            info["stuck_steps"] = stuck_steps
             info["apriltag_wall_id"] = apriltag_wall_id
             info["apriltag_wall_normal"] = apriltag_wall_normal
             info["apriltag_active"] = apriltag_active

@@ -1,5 +1,5 @@
 <mujoco model="pupper_v2_dji">
-  <compiler angle="radian" meshdir="/home/emiliano/experiments/robots/IFT6163_Project/puppersim/data/meshes/"/>
+  <compiler angle="radian" meshdir="meshes/"/>
 
   <asset>
     <mesh name="Cube.003" content_type="model/obj" file="Cube.003.obj"/>

@@ -116,6 +116,7 @@ Available starter profiles:
 * `puppersimMJX/tasks/navigation/config/training_profiles/sparse_collect_spheres.json`
 * `puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_hl.json`
 * `puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_nopriv_hl.json`
+* `puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_nopriv_hl_level4_mult-room_sparse.json`
 * `puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_hl_easy_single_tag.json`
 * `puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_state_hl.json`
 

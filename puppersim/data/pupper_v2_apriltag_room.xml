@@ -1,11 +1,11 @@
 <?xml version='1.0' encoding='utf-8'?>
 <mujoco model="pupper_v2_dji">
-  <compiler angle="radian" meshdir="/home/emiliano/experiments/robots/IFT6163_Project/puppersim/data/meshes/" autolimits="true" />
+  <compiler angle="radian" meshdir="meshes/" autolimits="true" />
   <asset>
     <mesh name="Cube.003" content_type="model/obj" file="Cube.003.obj" />
     <texture name="grid" type="2d" builtin="checker" width="512" height="512" rgb1=".2 .4 .6" rgb2=".4 .6 .8" />
     <material name="grid" texture="grid" texrepeat="1 1" texuniform="true" reflectance="0" />
-  <mesh name="apriltag_quad" file="apriltag_quad.obj" scale="1.0 1.0 1.0" inertia="shell" /><texture name="apriltag_good_tex" type="2d" file="/home/emiliano/experiments/robots/IFT6163_Project/puppersim/data/textures/apriltag_36h11_id101.png" /><texture name="apriltag_bad_tex" type="2d" file="/home/emiliano/experiments/robots/IFT6163_Project/puppersim/data/textures/apriltag_36h11_id287.png" /><material name="apriltag_good_mat" texture="apriltag_good_tex" texuniform="true" texrepeat="1 1" reflectance="0" shininess="0" specular="0" /><material name="apriltag_bad_mat" texture="apriltag_bad_tex" texuniform="true" texrepeat="1 1" reflectance="0" shininess="0" specular="0" /><material name="room_wall_mat" rgba="0.92 0.92 0.92 1" /></asset>
+  <mesh name="apriltag_quad" file="apriltag_quad.obj" scale="1.0 1.0 1.0" inertia="shell" /><texture name="apriltag_good_tex" type="2d" file="textures/apriltag_36h11_id101.png" /><texture name="apriltag_bad_tex" type="2d" file="textures/apriltag_36h11_id287.png" /><material name="apriltag_good_mat" texture="apriltag_good_tex" texuniform="true" texrepeat="1 1" reflectance="0" shininess="0" specular="0" /><material name="apriltag_bad_mat" texture="apriltag_bad_tex" texuniform="true" texrepeat="1 1" reflectance="0" shininess="0" specular="0" /><material name="room_wall_mat" rgba="0.92 0.92 0.92 1" /></asset>
   <worldbody>
     <body name="base_link" pos="0 0 0.20">
       <inertial pos="0 -0.048 -0.00964" quat="0.499924 0.500153 -0.497855 0.50206" mass="0.991" diaginertia="0.00678008 0.00626009 0.00174983" />

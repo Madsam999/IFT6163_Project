@@ -1,0 +1,14 @@
+{
+  "name": "apriltag_walls_camera_nopriv_hl_level4_mult-room_sparse",
+  "description": "Level 4 multi-room AprilTag walls (sparse reward): 3 collections per episode, respawn on collect, end on all collected, and include goals_collected in high-level camera_nopriv observation.",
+  "env_kwargs": "puppersimMJX/tasks/apriltag_walls/config/pupper_brax_env_kwargs.apriltag_walls_camera_nopriv_hl_level4_mult-room_sparse.json",
+  "train_overrides": {
+    "learning_rate": 0.0001,
+    "learning_rate_schedule": "linear",
+    "learning_rate_final": 0.00001,
+    "learning_rate_anneal_steps": 100000000,
+    "entropy_cost": 0.001,
+    "discounting": 0.995,
+    "unroll_length": 128
+  }
+}
