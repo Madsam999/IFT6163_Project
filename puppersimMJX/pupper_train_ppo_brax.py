@@ -213,6 +213,10 @@ class Args:
     """xy padding (meters) around inferred map bounds in report plots"""
     report_dirname: str = "reports"
     """base directory for saved report images"""
+    report_num_rollouts: int = 1
+    """number of independent rollout seeds to aggregate per report image"""
+    report_seed_stride: int = 1009
+    """seed increment between aggregated rollout reports"""
 
 
 def _slugify_name(value: str) -> str:
@@ -1306,6 +1310,8 @@ if __name__ == "__main__":
                 front_camera_name=(args.report_front_camera_name or None),
                 topdown_camera_name=(args.report_topdown_camera_name or None),
                 map_margin=float(args.report_map_margin),
+                num_rollouts=int(args.report_num_rollouts),
+                rollout_seed_stride=int(args.report_seed_stride),
             )
             report_state["initial_saved"] = True
             last_report_state["path"] = initial_report_path
@@ -1400,6 +1406,8 @@ if __name__ == "__main__":
                 front_camera_name=(args.report_front_camera_name or None),
                 topdown_camera_name=(args.report_topdown_camera_name or None),
                 map_margin=float(args.report_map_margin),
+                num_rollouts=int(args.report_num_rollouts),
+                rollout_seed_stride=int(args.report_seed_stride),
             )
             last_report_state["path"] = report_output_path
             print(f"training report saved to {report_output_path}")

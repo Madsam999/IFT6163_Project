@@ -16,7 +16,7 @@ import sys
 import time
 from collections import deque
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
@@ -158,6 +158,49 @@ def _parse_json_or_file(raw: str) -> Dict[str, Any]:
 
 def _parse_profile(raw: str) -> Dict[str, Any]:
     return _parse_json_or_file(raw)
+
+
+def _apply_profile_train_overrides(args: Args, profile: Mapping[str, Any]) -> Args:
+    overrides = profile.get("train_overrides")
+    if overrides is None:
+        return args
+    if not isinstance(overrides, Mapping):
+        raise ValueError("profile field 'train_overrides' must be a JSON object/dict.")
+
+    defaults = Args()
+    valid_fields = {f.name for f in fields(Args)}
+    alias_map = {
+        "unroll_length": "rollout_length",
+        "discounting": "gamma",
+        "entropy_cost": "ent_coef",
+    }
+
+    applied: Dict[str, Any] = {}
+    ignored: Dict[str, Any] = {}
+    for key, value in overrides.items():
+        raw_key = str(key)
+        target_key = alias_map.get(raw_key, raw_key)
+        if target_key not in valid_fields:
+            ignored[raw_key] = value
+            continue
+        current_value = getattr(args, target_key)
+        default_value = getattr(defaults, target_key)
+        # Keep CLI/user-provided args over profile defaults.
+        if current_value != default_value:
+            continue
+        setattr(args, target_key, value)
+        applied[f"{raw_key}->{target_key}" if raw_key != target_key else raw_key] = value
+
+    if applied:
+        applied_summary = ", ".join(f"{k}={applied[k]}" for k in sorted(applied))
+        print(f"info: applied profile train_overrides: {applied_summary}")
+    if ignored:
+        ignored_summary = ", ".join(sorted(ignored))
+        print(
+            "warning: ignored unsupported profile train_overrides keys for pixel trainer: "
+            f"{ignored_summary}"
+        )
+    return args
 
 
 def _parse_int_tuple(spec: str, name: str) -> Tuple[int, ...]:
@@ -941,6 +984,7 @@ def main(args: Args) -> None:
     _ensure_custom_env_registered(args, envs)
 
     profile = _parse_profile(args.profile)
+    args = _apply_profile_train_overrides(args, profile)
     profile_env_kwargs = (
         dict(profile.get("env_kwargs", {}))
         if isinstance(profile.get("env_kwargs", {}), dict)

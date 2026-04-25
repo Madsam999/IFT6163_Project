@@ -303,6 +303,8 @@ def _build_env_class():
             apriltag_wall_cell_size: float = 0.6,
             apriltag_wall_corner_margin: float = 0.12,
             apriltag_wall_surface_inset: float = 0.0,
+            apriltag_reset_spawn_positions: Tuple[Tuple[float, float], ...] = (),
+            apriltag_reset_spawn_jitter_m: float = 0.0,
             apriltag_end_episode_on_collect: bool = True,
             apriltag_end_episode_on_all_collected: bool = False,
             apriltag_deactivate_on_collect: bool = True,
@@ -465,6 +467,15 @@ def _build_env_class():
             self._apriltag_wall_cell_size = float(max(1e-4, apriltag_wall_cell_size))
             self._apriltag_wall_corner_margin = float(max(0.0, apriltag_wall_corner_margin))
             self._apriltag_wall_surface_inset = float(max(0.0, apriltag_wall_surface_inset))
+            self._apriltag_reset_spawn_jitter_m = float(max(0.0, apriltag_reset_spawn_jitter_m))
+            self._apriltag_reset_spawn_positions = np.zeros((0, 2), dtype=np.float32)
+            if apriltag_reset_spawn_positions:
+                spawn_xy = np.asarray(apriltag_reset_spawn_positions, dtype=np.float32)
+                if spawn_xy.ndim != 2 or spawn_xy.shape[1] != 2:
+                    raise ValueError(
+                        "apriltag_reset_spawn_positions must be a list/tuple of [x, y] pairs."
+                    )
+                self._apriltag_reset_spawn_positions = spawn_xy
             self._apriltag_end_episode_on_collect = bool(apriltag_end_episode_on_collect)
             self._apriltag_end_episode_on_all_collected = bool(apriltag_end_episode_on_all_collected)
             self._apriltag_deactivate_on_collect = bool(apriltag_deactivate_on_collect)
@@ -1627,7 +1638,7 @@ def _build_env_class():
             return jp.min(dists)
 
         def reset(self, rng: jp.ndarray) -> State:
-            rng, rng1, rng2, goal_key = jax.random.split(rng, 4)
+            rng, rng1, rng2, goal_key, spawn_key = jax.random.split(rng, 5)
             q = self._default_q
             if self._reset_noise_scale > 0.0 or self._reset_base_noise_scale > 0.0:
                 q_noise = jp.zeros((self.sys.q_size(),), dtype=q.dtype)
@@ -1642,6 +1653,28 @@ def _build_env_class():
                     )
                     q_noise = q_noise.at[7 : 7 + self._act_size].set(joint_noise)
                 q = q + q_noise
+
+            if (
+                self._reward_mode == "apriltag_walls"
+                and int(self._apriltag_reset_spawn_positions.shape[0]) > 0
+                and q.shape[0] >= 2
+            ):
+                spawn_xy_arr = jp.asarray(self._apriltag_reset_spawn_positions, dtype=q.dtype)
+                spawn_idx = jax.random.randint(
+                    spawn_key, shape=(), minval=0, maxval=int(spawn_xy_arr.shape[0])
+                )
+                spawn_xy = spawn_xy_arr[spawn_idx]
+                if self._apriltag_reset_spawn_jitter_m > 0.0:
+                    spawn_key, jkey = jax.random.split(spawn_key)
+                    jitter = jax.random.uniform(
+                        jkey,
+                        shape=(2,),
+                        minval=-self._apriltag_reset_spawn_jitter_m,
+                        maxval=self._apriltag_reset_spawn_jitter_m,
+                    ).astype(q.dtype)
+                    spawn_xy = spawn_xy + jitter
+                q = q.at[0].set(spawn_xy[0])
+                q = q.at[1].set(spawn_xy[1])
             qd = self._reset_qd_noise_scale * jax.random.normal(rng2, shape=(self.sys.qd_size(),))
             pipeline_state = self.pipeline_init(q, qd)
 

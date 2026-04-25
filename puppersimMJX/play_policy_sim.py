@@ -192,6 +192,23 @@ def _apply_reset_qd_noise(model: mj.MjModel, data: mj.MjData, scale: float, rng:
     data.qvel[:] = np.asarray(data.qvel, dtype=np.float64) + float(scale) * rng.standard_normal(model.nv)
 
 
+def _apply_spawn_xy_if_configured(
+    data: mj.MjData,
+    spawn_positions: Optional[np.ndarray],
+    spawn_jitter_m: float,
+    rng: np.random.Generator,
+) -> None:
+    if spawn_positions is None or spawn_positions.size == 0:
+        return
+    idx = int(rng.integers(0, int(spawn_positions.shape[0])))
+    xy = np.asarray(spawn_positions[idx], dtype=np.float64).copy()
+    if float(spawn_jitter_m) > 0.0:
+        xy += rng.uniform(-float(spawn_jitter_m), float(spawn_jitter_m), size=(2,))
+    if data.qpos.shape[0] >= 2:
+        data.qpos[0] = float(xy[0])
+        data.qpos[1] = float(xy[1])
+
+
 def _sample_lateral(rng: np.random.Generator, span: float, num_slots: int) -> float:
     if int(num_slots) > 1:
         slot = int(rng.integers(0, int(num_slots)))
@@ -1048,6 +1065,26 @@ def main() -> None:
     goal_rng = np.random.default_rng(int(args.goal_seed))
     goals_collected = 0
     goal_xy = np.zeros((2,), dtype=np.float64)
+    spawn_positions = None
+    spawn_jitter_m = float(max(0.0, env_cfg.get("apriltag_reset_spawn_jitter_m", 0.0)))
+    try:
+        raw_spawn_positions = env_cfg.get("apriltag_reset_spawn_positions", None)
+        if raw_spawn_positions:
+            arr = np.asarray(raw_spawn_positions, dtype=np.float64)
+            if arr.ndim == 2 and arr.shape[1] == 2:
+                spawn_positions = arr
+    except Exception:
+        spawn_positions = None
+    spawn_rng = np.random.default_rng(int(args.tag_seed) + 9001)
+    _apply_spawn_xy_if_configured(
+        data=data,
+        spawn_positions=spawn_positions,
+        spawn_jitter_m=spawn_jitter_m,
+        rng=spawn_rng,
+    )
+    mj.mj_forward(model, data)
+    if spawn_positions is not None and spawn_positions.size > 0:
+        print(f"[spawn] init base_xy=({float(data.qpos[0]):+.3f},{float(data.qpos[1]):+.3f})")
     if goal_enabled:
         base_xy0 = np.asarray(data.xpos[base_body_id, :2], dtype=np.float64)
         goal_xy = _sample_goal_xy(goal_rng, base_xy0, float(args.goal_radius_min), float(args.goal_radius_max))
@@ -1086,7 +1123,15 @@ def main() -> None:
                 except Exception:
                     pass
             _apply_reset_qd_noise(model, data, reset_qd_noise_scale, reset_noise_rng)
+            _apply_spawn_xy_if_configured(
+                data=data,
+                spawn_positions=spawn_positions,
+                spawn_jitter_m=spawn_jitter_m,
+                rng=spawn_rng,
+            )
             mj.mj_forward(model, data)
+            if spawn_positions is not None and spawn_positions.size > 0:
+                print(f"[spawn] reset base_xy=({float(data.qpos[0]):+.3f},{float(data.qpos[1]):+.3f})")
             cmd[:] = 0.0
             # Re-arm policy timing after simulation time jumps back to 0.
             policy_next_t = 0.0

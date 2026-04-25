@@ -30,6 +30,10 @@
   "apriltag_wall_cell_size": 0.6,
   "apriltag_wall_corner_margin": 0.12,
   "apriltag_wall_surface_inset": 0.02,
+  "apriltag_reset_spawn_positions": [
+    [2.3, -0.6]
+  ],
+  "apriltag_reset_spawn_jitter_m": 0.0,
   "apriltag_end_episode_on_collect": false,
   "apriltag_end_episode_on_all_collected": true,
   "apriltag_resample_on_collect": true,
