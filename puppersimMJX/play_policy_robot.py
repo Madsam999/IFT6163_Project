@@ -32,7 +32,7 @@ if _STANFORD_ROOT not in sys.path:
 from djipupper import HardwareInterface
 from djipupper.IndividualConfig import SERIAL_PORT
 from puppersim import pupper_constants
-from puppersimMJX.pupper_brax_policy_bundle import BraxPolicyBundle
+from puppersimMJX.helper.pupper_brax_policy_bundle import BraxPolicyBundle
 
 
 def _parse_env_kwargs(raw: str) -> Dict[str, Any]:

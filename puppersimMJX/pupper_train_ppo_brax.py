@@ -183,18 +183,6 @@ class Args:
     """front camera name used for inset overlay"""
     video_front_inset_scale: float = 0.33
     """inset size as fraction of output width/height"""
-    video_randomize_goal_marker: bool = True
-    """randomize static goal marker site position per saved video when available"""
-    video_goal_marker_site_name: str = "goal_marker"
-    """site name for the static goal marker in MJCF"""
-    video_goal_marker_radius_min: float = 0.8
-    """minimum radial distance for randomized goal marker position"""
-    video_goal_marker_radius_max: float = 2.5
-    """maximum radial distance for randomized goal marker position"""
-    video_goal_marker_z: float = 0.02
-    """z-height for randomized goal marker site"""
-    video_sync_goal_marker_to_collectible: bool = True
-    """sync rendered goal marker to true collectible goal position at each frame when available"""
     video_fps: int = 0
     """video fps (<=0 means inferred from env.dt)"""
     video_dirname: str = "videos"
@@ -697,17 +685,10 @@ def _save_rollout_video_from_policy_builder(
     front_camera_inset: bool,
     front_camera_name: Optional[str],
     front_inset_scale: float,
-    randomize_goal_marker: bool,
-    goal_marker_site_name: str,
-    goal_marker_radius_min: float,
-    goal_marker_radius_max: float,
-    goal_marker_z: float,
-    sync_goal_marker_to_collectible: bool,
     fps: int,
 ) -> None:
     import jax
     import numpy as np
-    from jax import numpy as jp
 
     try:
         import imageio.v2 as imageio
@@ -721,38 +702,12 @@ def _save_rollout_video_from_policy_builder(
     policy = make_policy_builder(params, deterministic=True)
     policy = jax.jit(policy)
 
-    goal_positions_xy: list[np.ndarray] = []
     apriltag_wall_ids: list[Optional[int]] = []
-
-    if randomize_goal_marker:
-        try:
-            sys_obj = getattr(env, "sys", None)
-            site_names = list(getattr(sys_obj, "site_names", [])) if sys_obj is not None else []
-            if goal_marker_site_name in site_names:
-                site_idx = int(site_names.index(goal_marker_site_name))
-                rng_vis = np.random.default_rng(int(seed) + 1337)
-                r_lo = float(min(goal_marker_radius_min, goal_marker_radius_max))
-                r_hi = float(max(goal_marker_radius_min, goal_marker_radius_max))
-                radius = float(rng_vis.uniform(r_lo, r_hi))
-                angle = float(rng_vis.uniform(-np.pi, np.pi))
-                gx = radius * np.cos(angle)
-                gy = radius * np.sin(angle)
-                site_pos = np.asarray(getattr(sys_obj, "site_pos"))
-                if 0 <= site_idx < int(site_pos.shape[0]):
-                    site_pos = np.array(site_pos, copy=True)
-                    site_pos[site_idx, 0] = gx
-                    site_pos[site_idx, 1] = gy
-                    site_pos[site_idx, 2] = float(goal_marker_z)
-                    if hasattr(sys_obj, "replace"):
-                        env.sys = sys_obj.replace(site_pos=jp.asarray(site_pos))
-        except Exception as exc:
-            print(f"warning: goal marker randomization skipped ({exc})")
 
     rng = jax.random.PRNGKey(int(seed))
     rng, reset_rng = jax.random.split(rng)
     state = reset_fn(reset_rng)
     rollout = [state.pipeline_state]
-    goal_positions_xy.append(np.asarray(state.info.get("goal_position", jp.zeros((2,), dtype=state.obs.dtype))))
     wall0 = state.info.get("apriltag_wall_id", None)
     apriltag_wall_ids.append(None if wall0 is None else int(np.asarray(wall0)))
 
@@ -761,7 +716,6 @@ def _save_rollout_video_from_policy_builder(
         action, _ = policy(state.obs, policy_rng)
         state = step_fn(state, action)
         rollout.append(state.pipeline_state)
-        goal_positions_xy.append(np.asarray(state.info.get("goal_position", jp.zeros((2,), dtype=state.obs.dtype))))
         wall_i = state.info.get("apriltag_wall_id", None)
         apriltag_wall_ids.append(None if wall_i is None else int(np.asarray(wall_i)))
         done_flag = float(np.asarray(state.done))
@@ -769,7 +723,6 @@ def _save_rollout_video_from_policy_builder(
             rng, reset_rng = jax.random.split(rng)
             state = reset_fn(reset_rng)
             rollout.append(state.pipeline_state)
-            goal_positions_xy.append(np.asarray(state.info.get("goal_position", jp.zeros((2,), dtype=state.obs.dtype))))
             wall_r = state.info.get("apriltag_wall_id", None)
             apriltag_wall_ids.append(None if wall_r is None else int(np.asarray(wall_r)))
 
@@ -784,43 +737,7 @@ def _save_rollout_video_from_policy_builder(
     if camera:
         render_kwargs["camera"] = camera
 
-    def _render_with_synced_goal(
-        camera_name: Optional[str],
-        frame_w: int,
-        frame_h: int,
-    ):
-        sys_obj = getattr(env, "sys", None)
-        if sys_obj is None or not hasattr(sys_obj, "site_names") or not hasattr(sys_obj, "site_pos"):
-            raise RuntimeError("env.sys has no site metadata")
-        site_names = list(getattr(sys_obj, "site_names"))
-        if goal_marker_site_name not in site_names:
-            raise RuntimeError(f"site '{goal_marker_site_name}' not found")
-        site_idx = int(site_names.index(goal_marker_site_name))
-        if len(goal_positions_xy) != len(rollout):
-            raise RuntimeError("goal/rollout length mismatch")
-
-        original_sys = env.sys
-        out_frames = []
-        try:
-            for pstate, gxy in zip(rollout, goal_positions_xy):
-                gx = float(np.asarray(gxy)[0])
-                gy = float(np.asarray(gxy)[1])
-                site_pos = np.array(np.asarray(env.sys.site_pos), copy=True)
-                site_pos[site_idx, 0] = gx
-                site_pos[site_idx, 1] = gy
-                site_pos[site_idx, 2] = float(goal_marker_z)
-                env.sys = env.sys.replace(site_pos=jp.asarray(site_pos))
-
-                kwargs = {"height": int(frame_h), "width": int(frame_w)}
-                if camera_name:
-                    kwargs["camera"] = camera_name
-                frame = env.render([pstate], **kwargs)[0]
-                out_frames.append(np.array(frame, copy=True))
-        finally:
-            env.sys = original_sys
-        return out_frames
-
-    def _render_with_mujoco_goal_sync(
+    def _render_with_mujoco_geom_sync(
         camera_name: Optional[str],
         frame_w: int,
         frame_h: int,
@@ -838,20 +755,11 @@ def _save_rollout_video_from_policy_builder(
         d = mj.MjData(m)
         renderer = mj.Renderer(m, height=int(frame_h), width=int(frame_w))
 
-        site_id = int(mj.mj_name2id(m, mj.mjtObj.mjOBJ_SITE, goal_marker_site_name))
-        if site_id < 0:
-            # Some apriltag profiles do not define a separate goal-marker site.
-            # Keep rendering (and geom pose sync) active even without this site.
-            site_id = -1
-
         cam_id = -1
         if camera_name:
             cam_id = int(mj.mj_name2id(m, mj.mjtObj.mjOBJ_CAMERA, str(camera_name)))
             if cam_id < 0:
                 raise RuntimeError(f"camera '{camera_name}' not found in MuJoCo model")
-
-        if len(goal_positions_xy) != len(rollout):
-            raise RuntimeError("goal/rollout length mismatch")
 
         good_geom_id = int(mj.mj_name2id(m, mj.mjtObj.mjOBJ_GEOM, "apriltag_good_panel"))
         bad_geom_id = int(mj.mj_name2id(m, mj.mjtObj.mjOBJ_GEOM, "apriltag_bad_panel"))
@@ -864,7 +772,7 @@ def _save_rollout_video_from_policy_builder(
 
         out_frames = []
         try:
-            for pstate, gxy in zip(rollout, goal_positions_xy):
+            for pstate in rollout:
                 q = np.asarray(pstate.q, dtype=np.float64)
                 qd = np.asarray(pstate.qd, dtype=np.float64)
                 if q.shape[0] != m.nq or qd.shape[0] != m.nv:
@@ -874,10 +782,6 @@ def _save_rollout_video_from_policy_builder(
 
                 d.qpos[:] = q
                 d.qvel[:] = qd
-                if site_id >= 0:
-                    m.site_pos[site_id, 0] = float(np.asarray(gxy)[0])
-                    m.site_pos[site_id, 1] = float(np.asarray(gxy)[1])
-                    m.site_pos[site_id, 2] = float(goal_marker_z)
 
                 # Keep AprilTag panel render aligned with env pipeline_state.
                 if hasattr(pstate, "geom_xpos") and hasattr(pstate, "geom_xmat"):
@@ -913,61 +817,25 @@ def _save_rollout_video_from_policy_builder(
     reward_mode = str(getattr(env, "_reward_mode", "")).strip().lower()
     prefer_mujoco_renderer = reward_mode == "apriltag_walls"
 
-    goal_sync_active = False
-    goal_sync_backend = "none"  # one of: none, brax, mujoco
-    if sync_goal_marker_to_collectible:
-        if prefer_mujoco_renderer:
-            try:
-                frames = _render_with_mujoco_goal_sync(camera_name=camera, frame_w=int(width), frame_h=int(height))
-                goal_sync_active = True
-                goal_sync_backend = "mujoco"
-                print("info: using MuJoCo renderer for apriltag_walls goal + geom sync")
-            except Exception as exc:
-                print(f"warning: MuJoCo apriltag renderer failed ({exc})")
-                try:
-                    frames = _render_with_synced_goal(camera_name=camera, frame_w=int(width), frame_h=int(height))
-                    goal_sync_active = True
-                    goal_sync_backend = "brax"
-                except Exception as exc2:
-                    print(f"warning: goal marker sync disabled ({exc2})")
-                    frames = env.render(rollout, **render_kwargs)
-        else:
-            try:
-                frames = _render_with_synced_goal(camera_name=camera, frame_w=int(width), frame_h=int(height))
-                goal_sync_active = True
-                goal_sync_backend = "brax"
-            except Exception as exc:
-                print(f"warning: goal marker sync disabled ({exc})")
-                try:
-                    frames = _render_with_mujoco_goal_sync(camera_name=camera, frame_w=int(width), frame_h=int(height))
-                    goal_sync_active = True
-                    goal_sync_backend = "mujoco"
-                    print("info: using MuJoCo fallback renderer for goal-marker sync")
-                except Exception as exc2:
-                    print(f"warning: MuJoCo goal sync fallback disabled ({exc2})")
-                    frames = env.render(rollout, **render_kwargs)
-    else:
-        if prefer_mujoco_renderer:
-            try:
-                frames = _render_with_mujoco_goal_sync(camera_name=camera, frame_w=int(width), frame_h=int(height))
-                print("info: using MuJoCo renderer for apriltag_walls geom sync")
-            except Exception as exc:
-                print(f"warning: MuJoCo apriltag renderer failed ({exc})")
-                frames = env.render(rollout, **render_kwargs)
-        else:
+    geom_sync_active = False
+    if prefer_mujoco_renderer:
+        try:
+            frames = _render_with_mujoco_geom_sync(camera_name=camera, frame_w=int(width), frame_h=int(height))
+            geom_sync_active = True
+            print("info: using MuJoCo renderer for apriltag_walls geom sync")
+        except Exception as exc:
+            print(f"warning: MuJoCo apriltag renderer failed ({exc})")
             frames = env.render(rollout, **render_kwargs)
+    else:
+        frames = env.render(rollout, **render_kwargs)
 
     if front_camera_inset and front_camera_name:
         try:
             inset_scale = float(np.clip(float(front_inset_scale), 0.1, 0.95))
             inset_w = max(1, int(round(int(width) * inset_scale)))
             inset_h = max(1, int(round(int(height) * inset_scale)))
-            if goal_sync_active and goal_sync_backend == "brax":
-                inset_frames = _render_with_synced_goal(
-                    camera_name=str(front_camera_name), frame_w=inset_w, frame_h=inset_h
-                )
-            elif goal_sync_active and goal_sync_backend == "mujoco":
-                inset_frames = _render_with_mujoco_goal_sync(
+            if geom_sync_active:
+                inset_frames = _render_with_mujoco_geom_sync(
                     camera_name=str(front_camera_name), frame_w=inset_w, frame_h=inset_h
                 )
             else:
@@ -1008,12 +876,6 @@ def _save_rollout_video(
     front_camera_inset: bool,
     front_camera_name: Optional[str],
     front_inset_scale: float,
-    randomize_goal_marker: bool,
-    goal_marker_site_name: str,
-    goal_marker_radius_min: float,
-    goal_marker_radius_max: float,
-    goal_marker_z: float,
-    sync_goal_marker_to_collectible: bool,
     fps: int,
 ) -> None:
     return _save_rollout_video_from_policy_builder(
@@ -1029,12 +891,6 @@ def _save_rollout_video(
         front_camera_inset=front_camera_inset,
         front_camera_name=front_camera_name,
         front_inset_scale=front_inset_scale,
-        randomize_goal_marker=randomize_goal_marker,
-        goal_marker_site_name=goal_marker_site_name,
-        goal_marker_radius_min=goal_marker_radius_min,
-        goal_marker_radius_max=goal_marker_radius_max,
-        goal_marker_z=goal_marker_z,
-        sync_goal_marker_to_collectible=sync_goal_marker_to_collectible,
         fps=fps,
     )
 
@@ -1275,12 +1131,6 @@ if __name__ == "__main__":
                 front_camera_inset=bool(args.video_front_camera_inset),
                 front_camera_name=(args.video_front_camera_name or None),
                 front_inset_scale=float(args.video_front_inset_scale),
-                randomize_goal_marker=bool(args.video_randomize_goal_marker),
-                goal_marker_site_name=str(args.video_goal_marker_site_name),
-                goal_marker_radius_min=float(args.video_goal_marker_radius_min),
-                goal_marker_radius_max=float(args.video_goal_marker_radius_max),
-                goal_marker_z=float(args.video_goal_marker_z),
-                sync_goal_marker_to_collectible=bool(args.video_sync_goal_marker_to_collectible),
                 fps=args.video_fps,
             )
             video_state["initial_saved"] = True
@@ -1302,7 +1152,7 @@ if __name__ == "__main__":
                     print(f"wandb initial video log failed at step={step}: {exc}")
 
         if args.capture_report and not bool(report_state["initial_saved"]):
-            from puppersimMJX.rollout_report import save_rollout_report
+            from puppersimMJX.helper.rollout_report import save_rollout_report
 
             initial_report_path = (
                 Path(args.report_dirname)
@@ -1367,12 +1217,6 @@ if __name__ == "__main__":
                 front_camera_inset=bool(args.video_front_camera_inset),
                 front_camera_name=(args.video_front_camera_name or None),
                 front_inset_scale=float(args.video_front_inset_scale),
-                randomize_goal_marker=bool(args.video_randomize_goal_marker),
-                goal_marker_site_name=str(args.video_goal_marker_site_name),
-                goal_marker_radius_min=float(args.video_goal_marker_radius_min),
-                goal_marker_radius_max=float(args.video_goal_marker_radius_max),
-                goal_marker_z=float(args.video_goal_marker_z),
-                sync_goal_marker_to_collectible=bool(args.video_sync_goal_marker_to_collectible),
                 fps=args.video_fps,
             )
             last_video_state["path"] = video_output_path
@@ -1398,7 +1242,7 @@ if __name__ == "__main__":
             args.capture_report_during_training
             and step >= report_state["next_step"]
         ):
-            from puppersimMJX.rollout_report import save_rollout_report
+            from puppersimMJX.helper.rollout_report import save_rollout_report
 
             report_output_path = (
                 Path(args.report_dirname)
@@ -1544,12 +1388,6 @@ if __name__ == "__main__":
             front_camera_inset=bool(args.video_front_camera_inset),
             front_camera_name=(args.video_front_camera_name or None),
             front_inset_scale=float(args.video_front_inset_scale),
-            randomize_goal_marker=bool(args.video_randomize_goal_marker),
-            goal_marker_site_name=str(args.video_goal_marker_site_name),
-            goal_marker_radius_min=float(args.video_goal_marker_radius_min),
-            goal_marker_radius_max=float(args.video_goal_marker_radius_max),
-            goal_marker_z=float(args.video_goal_marker_z),
-            sync_goal_marker_to_collectible=bool(args.video_sync_goal_marker_to_collectible),
             fps=args.video_fps,
         )
         last_video_state["path"] = video_output_path

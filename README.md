@@ -216,7 +216,7 @@ This is the recommended path for checkpoints like:
 
 1. Export a policy bundle (only needed once per checkpoint):
 ```bash
-python3 puppersimMJX/pupper_brax_export_policy_bundle.py \
+python3 puppersimMJX/helper/pupper_brax_export_policy_bundle.py \
   --params-path puppersim/data/pretrained_cc_locomotion/pupper_train_ppo_brax.params \
   --output-dir puppersim/data/pretrained_cc_locomotion
 ```

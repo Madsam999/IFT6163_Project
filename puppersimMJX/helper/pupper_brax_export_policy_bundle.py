@@ -228,7 +228,7 @@ def main() -> None:
                 "hidden_sizes": hidden_sizes,
                 "layer_names": layer_names,
                 "action_head": args.action_head,
-                "notes": "Use with puppersimMJX/pupper_brax_policy_bundle.py for deterministic inference.",
+                "notes": "Use with puppersimMJX/helper/pupper_brax_policy_bundle.py for deterministic inference.",
             },
             indent=2,
         )

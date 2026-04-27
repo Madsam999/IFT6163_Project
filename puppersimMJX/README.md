@@ -47,11 +47,11 @@ For command locomotion, ideally train for at least `500M+` steps for stronger tr
 ### AprilTag Walls (camera high-level policy)
 First generate OpenCV-detectable AprilTag textures and the room XML:
 ```bash
-python puppersimMJX/create_apriltag_room_assets.py
+python puppersimMJX/xml_generation/create_apriltag_room_assets.py
 ```
 For easier visual learning, you can generate a larger single-tag room:
 ```bash
-python puppersimMJX/create_apriltag_room_assets.py \
+python puppersimMJX/xml_generation/create_apriltag_room_assets.py \
   --tag-half 0.30 \
   --no-include-bad-tag
 ```
@@ -144,27 +144,22 @@ Example env kwargs snippet:
 ### MJCF utility
 Fix URDF mesh paths / MuJoCo tags:
 ```bash
-python puppersimMJX/fix_urdf.py \
+python puppersimMJX/xml_generation/fix_urdf.py \
   --urdf_path puppersim/data/pupper_v2a.urdf \
   --output_path puppersim/data/pupper_v2a.fixed.urdf
 ```
 
 Create stable MJX XML from a fixed URDF-converted XML:
 ```bash
-python puppersimMJX/create_mujoco_xml.py
+python puppersimMJX/xml_generation/create_mujoco_xml.py
 ```
 
 Add front camera to create `puppersim/data/pupper_v2_final_stable_cam.xml`:
 ```bash
-python puppersimMJX/add_camera_to_xml.py \
+python puppersimMJX/xml_generation/add_camera_to_xml.py \
   --xml-path puppersim/data/pupper_v2_final_stable.xml \
   --output puppersim/data/pupper_v2_final_stable_cam.xml \
   --force
-```
-
-Add a red goal marker site to create `puppersim/data/pupper_v2_final_stable_cam_goal.xml`:
-```bash
-python puppersimMJX/add_goal_marker_to_xml.py --force
 ```
 
 ## Run On Robot (After `deploy_to_robot.sh`)

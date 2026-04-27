@@ -36,7 +36,7 @@ class DenseLayer:
 
 
 class BraxPolicyBundle:
-    """Loads and runs a policy exported by `pupper_brax_export_policy_bundle.py`."""
+    """Loads and runs a policy exported by `helper/pupper_brax_export_policy_bundle.py`."""
 
     def __init__(self, bundle_dir: str | Path):
         bundle_dir = Path(bundle_dir)

@@ -18,5 +18,5 @@
     "hidden_4"
   ],
   "action_head": "normal_tanh",
-  "notes": "Use with puppersimMJX/pupper_brax_policy_bundle.py for deterministic inference."
+  "notes": "Use with puppersimMJX/helper/pupper_brax_policy_bundle.py for deterministic inference."
 }

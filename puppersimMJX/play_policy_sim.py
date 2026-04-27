@@ -30,7 +30,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from puppersim import pupper_constants
-from puppersimMJX.pupper_brax_policy_bundle import BraxPolicyBundle
+from puppersimMJX.helper.pupper_brax_policy_bundle import BraxPolicyBundle
 
 _APRILTAG_LEVEL4_GRID = (
     "11111111111",
@@ -213,12 +213,6 @@ def _decode_command_action(action: np.ndarray, xr: Tuple[float, float], yr: Tupl
         ],
         dtype=np.float32,
     )
-
-
-def _sample_goal_xy(rng: np.random.Generator, base_xy: np.ndarray, r_min: float, r_max: float) -> np.ndarray:
-    radius = float(rng.uniform(r_min, r_max))
-    angle = float(rng.uniform(-np.pi, np.pi))
-    return np.array([base_xy[0] + radius * np.cos(angle), base_xy[1] + radius * np.sin(angle)], dtype=np.float64)
 
 
 def _apply_reset_qd_noise(model: mj.MjModel, data: mj.MjData, scale: float, rng: np.random.Generator) -> None:
@@ -771,12 +765,6 @@ def main() -> None:
     )
     parser.add_argument("--good-tag-id", type=int, default=101)
     parser.add_argument("--bad-tag-id", type=int, default=287)
-    parser.add_argument("--goal-site-name", type=str, default="goal_marker")
-    parser.add_argument("--goal-z", type=float, default=0.02)
-    parser.add_argument("--goal-radius-min", type=float, default=0.8)
-    parser.add_argument("--goal-radius-max", type=float, default=2.5)
-    parser.add_argument("--goal-tolerance", type=float, default=0.25)
-    parser.add_argument("--goal-seed", type=int, default=0)
     parser.add_argument("--tag-randomize-on-reset", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--tag-randomize-front-wall-only", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--tag-wall-offset", type=float, default=1.95)
@@ -1152,15 +1140,10 @@ def main() -> None:
             f"applied=({gpos[0]:+.3f},{gpos[1]:+.3f},{gpos[2]:+.3f}) "
             f"normal=({gnorm[0]:+.3f},{gnorm[1]:+.3f},{gnorm[2]:+.3f})"
         )
-    goal_site_id = int(mj.mj_name2id(model, mj.mjtObj.mjOBJ_SITE, args.goal_site_name))
-    goal_enabled = goal_site_id >= 0
-    goal_rng = np.random.default_rng(int(args.goal_seed))
-    goals_collected = 0
     has_last_good_seen = 0.0
     last_good_u = 0.0
     last_good_v = 0.0
     steps_since_good_seen = 0.0
-    goal_xy = np.zeros((2,), dtype=np.float64)
     spawn_positions = None
     spawn_jitter_m = float(max(0.0, env_cfg.get("apriltag_reset_spawn_jitter_m", 0.0)))
     try:
@@ -1181,15 +1164,6 @@ def main() -> None:
     mj.mj_forward(model, data)
     if spawn_positions is not None and spawn_positions.size > 0:
         print(f"[spawn] init base_xy=({float(data.qpos[0]):+.3f},{float(data.qpos[1]):+.3f})")
-    if goal_enabled:
-        base_xy0 = np.asarray(data.xpos[base_body_id, :2], dtype=np.float64)
-        goal_xy = _sample_goal_xy(goal_rng, base_xy0, float(args.goal_radius_min), float(args.goal_radius_max))
-        model.site_pos[goal_site_id, 0] = goal_xy[0]
-        model.site_pos[goal_site_id, 1] = goal_xy[1]
-        model.site_pos[goal_site_id, 2] = float(args.goal_z)
-        print(f"goal_marker={args.goal_site_name} enabled (site_id={goal_site_id})")
-    else:
-        print(f"goal_marker={args.goal_site_name} not found in XML (visual marker disabled)")
 
     policy_next_t = 0.0
     wall_prev = time.monotonic()
@@ -1495,22 +1469,6 @@ def main() -> None:
                     reset_requested[0] = True
                 if tag_end_episode_on_all_collected and episode_target_reached:
                     reset_requested[0] = True
-
-        if goal_enabled:
-            base_xy = np.asarray(data.xpos[base_body_id, :2], dtype=np.float64)
-            dist = float(np.linalg.norm(goal_xy - base_xy))
-            if dist <= float(args.goal_tolerance):
-                goals_collected += 1
-                goal_xy = _sample_goal_xy(
-                    goal_rng,
-                    base_xy,
-                    float(args.goal_radius_min),
-                    float(args.goal_radius_max),
-                )
-                print(f"[collect] t={data.time:.2f}s goals_collected={goals_collected}")
-            model.site_pos[goal_site_id, 0] = goal_xy[0]
-            model.site_pos[goal_site_id, 1] = goal_xy[1]
-            model.site_pos[goal_site_id, 2] = float(args.goal_z)
 
         if args.simend > 0 and data.time >= args.simend:
             break
