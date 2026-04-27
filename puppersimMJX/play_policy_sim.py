@@ -42,6 +42,29 @@ _APRILTAG_LEVEL4_GRID = (
     "11111111111",
 )
 
+_POLICY_PRESETS = {
+    "cc_locomotion": {
+        "bundle_dir": "puppersimMJX/pretrained_policies/cc_locomotion/policy_bundle",
+        "env_kwargs": "puppersimMJX/tasks/cc_locomotion/config/pupper_brax_env_kwargs.command_locomotion.json",
+    },
+    "single_target_baseline_seed1": {
+        "bundle_dir": "puppersimMJX/pretrained_policies/single_target_baseline_seed1/policy_bundle",
+        "env_kwargs": "puppersimMJX/tasks/apriltag_walls/config/pupper_brax_env_kwargs.apriltag_walls_camera_nopriv_hl_level2.json",
+    },
+    "single_target_icm_seed1": {
+        "bundle_dir": "puppersimMJX/pretrained_policies/single_target_icm_seed1/policy_bundle",
+        "env_kwargs": "puppersimMJX/tasks/apriltag_walls/config/pupper_brax_env_kwargs.apriltag_walls_camera_nopriv_hl_level2.json",
+    },
+    "multi_target_baseline_seed3": {
+        "bundle_dir": "puppersimMJX/pretrained_policies/multi_target_baseline_seed3/policy_bundle",
+        "env_kwargs": "puppersimMJX/tasks/apriltag_walls/config/pupper_brax_env_kwargs.apriltag_walls_camera_nopriv_hl_level3.json",
+    },
+    "multi_target_icm_seed3": {
+        "bundle_dir": "puppersimMJX/pretrained_policies/multi_target_icm_seed3/policy_bundle",
+        "env_kwargs": "puppersimMJX/tasks/apriltag_walls/config/pupper_brax_env_kwargs.apriltag_walls_camera_nopriv_hl_level3.json",
+    },
+}
+
 
 # Mouse callback globals.
 _button_left = False
@@ -178,6 +201,18 @@ def _build_obs_fn(model, data, include_command: bool, exclude_xy: bool):
         return obs
 
     return _build
+
+
+def _decode_command_action(action: np.ndarray, xr: Tuple[float, float], yr: Tuple[float, float], yrw: Tuple[float, float]) -> np.ndarray:
+    a = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
+    return np.asarray(
+        [
+            0.5 * (xr[0] + xr[1]) + 0.5 * (xr[1] - xr[0]) * a[0],
+            0.5 * (yr[0] + yr[1]) + 0.5 * (yr[1] - yr[0]) * a[1],
+            0.5 * (yrw[0] + yrw[1]) + 0.5 * (yrw[1] - yrw[0]) * a[2],
+        ],
+        dtype=np.float32,
+    )
 
 
 def _sample_goal_xy(rng: np.random.Generator, base_xy: np.ndarray, r_min: float, r_max: float) -> np.ndarray:
@@ -511,6 +546,7 @@ def _camera_like_features(
     v = float(v * visible)
     centering = max(0.0, 1.0 - np.sqrt(min(1.0, float(u * u + v * v))))
     centering = float(centering * visible)
+    dist_norm = 1.0 / (1.0 + dist / 2.0)
     depth = max(rel_z, 1e-4)
     apparent_scale_raw = (2.0 * float(camera_obs_tag_half_size_m)) / (depth * tan_half)
     apparent_scale_raw = float(np.clip(apparent_scale_raw, 0.0, 1.0))
@@ -521,6 +557,7 @@ def _camera_like_features(
         "u": float(u),
         "v": float(v),
         "centering": float(centering),
+        "distance_norm": float(dist_norm),
         "apparent_scale": float(apparent_scale),
         "apparent_scale_raw": float(apparent_scale_raw),
     }
@@ -762,6 +799,12 @@ def main() -> None:
     parser.add_argument("--tag-inactive-y", type=float, default=1000.0)
     parser.add_argument("--tag-inactive-z", type=float, default=-1000.0)
 
+    parser.add_argument(
+        "--policy",
+        choices=sorted(_POLICY_PRESETS.keys()),
+        default="",
+        help="Shortcut for one of the packaged project policies.",
+    )
     parser.add_argument("--bundle-dir", type=Path, default=None)
     parser.add_argument(
         "--env-kwargs",
@@ -783,8 +826,15 @@ def main() -> None:
     parser.add_argument("--reset-noise-seed", type=int, default=0)
     args = parser.parse_args()
 
-    env_cfg = _parse_env_kwargs(args.env_kwargs)
     argv = set(sys.argv[1:])
+    if args.policy:
+        preset = _POLICY_PRESETS[args.policy]
+        if "--bundle-dir" not in argv:
+            args.bundle_dir = Path(preset["bundle_dir"])
+        if "--env-kwargs" not in argv:
+            args.env_kwargs = preset["env_kwargs"]
+
+    env_cfg = _parse_env_kwargs(args.env_kwargs)
     reset_qd_noise_scale = (
         float(args.reset_qd_noise_scale)
         if "--reset-qd-noise-scale" in argv
@@ -806,10 +856,18 @@ def main() -> None:
 
     # Optional policy setup.
     bundle = None
+    low_level_bundle = None
+    policy_mode = "none"
     cmd = np.zeros(3, dtype=np.float32)
     obs_hist = None
     obs_hist_len = 1
+    ll_obs_hist = None
+    ll_obs_hist_len = 1
+    hl_hold_steps = 1
+    hl_hold_counter = 0
+    high_level_prev_action = np.zeros(3, dtype=np.float32)
     build_obs = None
+    build_ll_obs = None
     act_dim = int(model.nu)
     low = np.asarray(pupper_constants.MOTOR_ACTION_LOWER_LIMIT, dtype=np.float32)[:act_dim]
     high = np.asarray(pupper_constants.MOTOR_ACTION_UPPER_LIMIT, dtype=np.float32)[:act_dim]
@@ -817,23 +875,50 @@ def main() -> None:
     action_half = 0.5 * (high - low)
     if args.bundle_dir is not None:
         bundle = BraxPolicyBundle(args.bundle_dir)
-        include_command = bool(env_cfg.get("include_command_in_obs", True))
-        exclude_xy = bool(env_cfg.get("exclude_xy_from_obs", True))
-        obs_hist_len = int(max(1, env_cfg.get("observation_history", 20)))
-        build_obs = _build_obs_fn(model, data, include_command=include_command, exclude_xy=exclude_xy)
-        base_obs = build_obs(cmd)
-        expected_dim = obs_hist_len * int(base_obs.shape[0])
-        if expected_dim != bundle.obs_dim:
-            raise ValueError(
-                f"Bundle obs_dim={bundle.obs_dim} != inferred {expected_dim} "
-                f"(history={obs_hist_len}, base={base_obs.shape[0]})."
-            )
-        obs_hist = np.tile(base_obs[None, :], (obs_hist_len, 1))
-        act_dim = min(act_dim, int(bundle.action_dim), int(low.shape[0]), int(high.shape[0]))
-        low = low[:act_dim]
-        high = high[:act_dim]
-        action_mid = action_mid[:act_dim]
-        action_half = action_half[:act_dim]
+        if int(bundle.action_dim) == 3 and bool(env_cfg.get("use_low_level_policy", False)):
+            policy_mode = "hierarchical"
+            ll_bundle_path = env_cfg.get("low_level_policy_bundle_path", "")
+            if not ll_bundle_path:
+                raise ValueError("High-level policy requires low_level_policy_bundle_path in env kwargs.")
+            low_level_bundle = BraxPolicyBundle(ll_bundle_path)
+            ll_obs_hist_len = int(max(1, env_cfg.get("low_level_obs_history", 20)))
+            ll_include_command = bool(env_cfg.get("low_level_include_command_in_obs", True))
+            exclude_xy = bool(env_cfg.get("exclude_xy_from_obs", True))
+            build_ll_obs = _build_obs_fn(model, data, include_command=ll_include_command, exclude_xy=exclude_xy)
+            ll_base_obs = build_ll_obs(cmd)
+            ll_expected_dim = ll_obs_hist_len * int(ll_base_obs.shape[0])
+            if ll_expected_dim != low_level_bundle.obs_dim:
+                raise ValueError(
+                    f"Low-level bundle obs_dim={low_level_bundle.obs_dim} != inferred {ll_expected_dim} "
+                    f"(history={ll_obs_hist_len}, base={ll_base_obs.shape[0]})."
+                )
+            ll_obs_hist = np.tile(ll_base_obs[None, :], (ll_obs_hist_len, 1))
+            hl_hz = float(env_cfg.get("high_level_policy_hz", 0.0))
+            hl_hold_steps = int(max(1, round((1.0 / hl_hz) / float(args.policy_dt)))) if hl_hz > 0.0 else 1
+            act_dim = min(act_dim, int(low_level_bundle.action_dim), int(low.shape[0]), int(high.shape[0]))
+            low = low[:act_dim]
+            high = high[:act_dim]
+            action_mid = action_mid[:act_dim]
+            action_half = action_half[:act_dim]
+        else:
+            policy_mode = "direct"
+            include_command = bool(env_cfg.get("include_command_in_obs", True))
+            exclude_xy = bool(env_cfg.get("exclude_xy_from_obs", True))
+            obs_hist_len = int(max(1, env_cfg.get("observation_history", 20)))
+            build_obs = _build_obs_fn(model, data, include_command=include_command, exclude_xy=exclude_xy)
+            base_obs = build_obs(cmd)
+            expected_dim = obs_hist_len * int(base_obs.shape[0])
+            if expected_dim != bundle.obs_dim:
+                raise ValueError(
+                    f"Bundle obs_dim={bundle.obs_dim} != inferred {expected_dim} "
+                    f"(history={obs_hist_len}, base={base_obs.shape[0]})."
+                )
+            obs_hist = np.tile(base_obs[None, :], (obs_hist_len, 1))
+            act_dim = min(act_dim, int(bundle.action_dim), int(low.shape[0]), int(high.shape[0]))
+            low = low[:act_dim]
+            high = high[:act_dim]
+            action_mid = action_mid[:act_dim]
+            action_half = action_half[:act_dim]
     tag_detector = _create_apriltag_detector(args.apriltag_family) if bool(args.detect_apriltag) else None
     if bool(args.detect_apriltag) and tag_detector is None:
         print("warning: AprilTag detection unavailable (opencv-contrib missing or family unsupported).")
@@ -867,7 +952,10 @@ def main() -> None:
 
     camera_id = int(mj.mj_name2id(model, mj.mjtObj.mjOBJ_CAMERA, args.camera_name))
     if camera_id < 0:
-        raise ValueError(f"Camera '{args.camera_name}' not found in model.")
+        print(f"warning: camera '{args.camera_name}' not found in model; camera inset/detection disabled.")
+        tag_detector = None
+        args.show_grayscale = False
+        args.show_camera_features = False
     base_body_id = int(mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "base_link"))
     if base_body_id < 0:
         raise ValueError("Body 'base_link' not found in model.")
@@ -934,7 +1022,11 @@ def main() -> None:
     else:
         tag_randomize_on_reset = bool(env_cfg.get("apriltag_randomize_good_goal_on_reset", args.tag_randomize_on_reset))
     tag_use_bad = bool(env_cfg.get("apriltag_use_bad_tag", True))
-    tag_collect_radius = float(args.tag_collect_radius)
+    if "--tag-collect-radius" in argv:
+        tag_collect_radius = float(args.tag_collect_radius)
+    else:
+        reward_cfg = env_cfg.get("reward_config", {})
+        tag_collect_radius = float(reward_cfg.get("collect_radius_m", args.tag_collect_radius))
     if "--tag-deactivate-on-collect" in argv or "--no-tag-deactivate-on-collect" in argv:
         tag_deactivate_on_collect = bool(args.tag_deactivate_on_collect)
     else:
@@ -1064,6 +1156,10 @@ def main() -> None:
     goal_enabled = goal_site_id >= 0
     goal_rng = np.random.default_rng(int(args.goal_seed))
     goals_collected = 0
+    has_last_good_seen = 0.0
+    last_good_u = 0.0
+    last_good_v = 0.0
+    steps_since_good_seen = 0.0
     goal_xy = np.zeros((2,), dtype=np.float64)
     spawn_positions = None
     spawn_jitter_m = float(max(0.0, env_cfg.get("apriltag_reset_spawn_jitter_m", 0.0)))
@@ -1114,6 +1210,107 @@ def main() -> None:
     camera_obs_include_forward_clearance = bool(env_cfg.get("camera_obs_include_forward_clearance", False))
     camera_obs_max_clearance_m = float(max(1e-3, env_cfg.get("camera_obs_max_clearance_m", 3.0)))
 
+    def _current_camera_features(tag_geom_id: int) -> Dict[str, float]:
+        if tag_geom_id < 0 or float(model.geom_rgba[tag_geom_id, 3]) <= 0.0:
+            return {
+                "visible": 0.0,
+                "forward_cos": 0.0,
+                "u": 0.0,
+                "v": 0.0,
+                "centering": 0.0,
+                "distance_norm": 0.0,
+                "apparent_scale": 0.0,
+                "apparent_scale_raw": 0.0,
+            }
+        base_pos = np.asarray(data.xpos[base_body_id], dtype=np.float64)
+        base_quat = np.asarray(data.xquat[base_body_id], dtype=np.float64)
+        tag_pos = np.asarray(model.geom_pos[tag_geom_id], dtype=np.float64)
+        return _camera_like_features(
+            base_pos=base_pos,
+            base_quat_wxyz=base_quat,
+            tag_pos=tag_pos,
+            wall_rects=room_wall_rects,
+            front_camera_offset_in_body=front_camera_offset_in_body,
+            front_camera_forward_in_body=front_camera_forward_in_body,
+            front_camera_up_in_body=front_camera_up_in_body,
+            camera_tan_half_fov=camera_tan_half_fov,
+            camera_obs_uv_bins=camera_obs_uv_bins,
+            camera_obs_tag_half_size_m=camera_obs_tag_half_size_m,
+        )
+
+    def _current_forward_clearance() -> float:
+        base_pos = np.asarray(data.xpos[base_body_id], dtype=np.float64)
+        base_quat = np.asarray(data.xquat[base_body_id], dtype=np.float64)
+        cam_pos = base_pos + _quat_rotate_wxyz(base_quat, front_camera_offset_in_body)
+        cam_fwd = _quat_rotate_wxyz(base_quat, front_camera_forward_in_body)
+        cam_fwd = cam_fwd / max(1e-6, float(np.linalg.norm(cam_fwd)))
+        if room_wall_rects:
+            return _forward_clearance_from_rects(
+                cam_pos=cam_pos,
+                cam_fwd=cam_fwd,
+                wall_rects=room_wall_rects,
+                max_clearance_m=camera_obs_max_clearance_m,
+            )
+        return _forward_clearance_from_room(
+            cam_pos=cam_pos,
+            cam_fwd=cam_fwd,
+            wall_inner_pos=wall_inner_pos,
+            max_clearance_m=camera_obs_max_clearance_m,
+        )
+
+    def _pack_camera_features(feat: Dict[str, float], include_privileged: bool) -> list[float]:
+        if include_privileged:
+            return [
+                float(feat["visible"]),
+                float(feat["u"]),
+                float(feat["v"]),
+                float(feat["forward_cos"]),
+                float(feat["centering"]),
+                float(feat["distance_norm"]),
+            ]
+        return [
+            float(feat["visible"]),
+            float(feat["u"]),
+            float(feat["v"]),
+            float(feat["centering"]),
+            float(feat["apparent_scale"]),
+        ]
+
+    def _build_high_level_obs(prev_action_command: np.ndarray) -> np.ndarray:
+        include_privileged = str(env_cfg.get("high_level_obs_mode", "camera_nopriv")).strip().lower() == "camera"
+        obs_vals = _pack_camera_features(_current_camera_features(good_geom_id), include_privileged)
+        if bool(env_cfg.get("apriltag_use_bad_tag", True)):
+            obs_vals.extend(_pack_camera_features(_current_camera_features(bad_geom_id), include_privileged))
+        if camera_obs_include_forward_clearance:
+            obs_vals.append(float(_current_forward_clearance()))
+        if bool(env_cfg.get("reward_requires_command", False)) and bool(env_cfg.get("include_command_in_obs", True)):
+            obs_vals.extend([float(x) for x in cmd])
+        if bool(env_cfg.get("apriltag_include_goals_collected_in_obs", False)):
+            obs_vals.append(float(tag_episode_collected))
+        if bool(env_cfg.get("apriltag_include_prev_action_in_obs", False)):
+            obs_vals.extend([float(x) for x in prev_action_command])
+        if bool(env_cfg.get("apriltag_include_last_good_seen_in_obs", False)):
+            obs_vals.extend(
+                [
+                    float(has_last_good_seen),
+                    float(last_good_u),
+                    float(last_good_v),
+                    float(steps_since_good_seen),
+                ]
+            )
+        return np.asarray(obs_vals, dtype=np.float32)
+
+    if policy_mode == "hierarchical":
+        base_obs = _build_high_level_obs(high_level_prev_action)
+        if int(base_obs.shape[0]) != int(bundle.obs_dim):
+            raise ValueError(f"High-level bundle obs_dim={bundle.obs_dim} != inferred {base_obs.shape[0]}.")
+        obs_hist = base_obs[None, :]
+        obs_hist_len = 1
+        print(
+            f"loaded high-level policy preset={args.policy or '<custom>'} "
+            f"bundle={args.bundle_dir} low_level={env_cfg.get('low_level_policy_bundle_path')}"
+        )
+
     while not glfw.window_should_close(window):
         if reset_requested[0]:
             mj.mj_resetData(model, data)
@@ -1133,9 +1330,20 @@ def main() -> None:
             if spawn_positions is not None and spawn_positions.size > 0:
                 print(f"[spawn] reset base_xy=({float(data.qpos[0]):+.3f},{float(data.qpos[1]):+.3f})")
             cmd[:] = 0.0
+            high_level_prev_action[:] = 0.0
+            hl_hold_counter = 0
+            has_last_good_seen = 0.0
+            last_good_u = 0.0
+            last_good_v = 0.0
+            steps_since_good_seen = 0.0
             # Re-arm policy timing after simulation time jumps back to 0.
             policy_next_t = 0.0
-            if bundle is not None and build_obs is not None and obs_hist is not None:
+            if policy_mode == "hierarchical" and build_ll_obs is not None and ll_obs_hist is not None:
+                base_obs = _build_high_level_obs(high_level_prev_action)
+                obs_hist = base_obs[None, :]
+                ll_base_obs = build_ll_obs(cmd)
+                ll_obs_hist = np.tile(ll_base_obs[None, :], (ll_obs_hist_len, 1))
+            elif bundle is not None and build_obs is not None and obs_hist is not None:
                 base_obs = build_obs(cmd)
                 obs_hist = np.tile(base_obs[None, :], (obs_hist_len, 1))
             tag_episode_collected = 0
@@ -1169,13 +1377,39 @@ def main() -> None:
         yaw_in = float(glfw.get_key(window, glfw.KEY_Q) == glfw.PRESS) - float(
             glfw.get_key(window, glfw.KEY_E) == glfw.PRESS
         )
-        # RC-style hold behavior: command returns to 0 when keys are released.
-        cmd[0] = vx_in * float(args.x_speed)
-        cmd[1] = vy_in * float(args.y_speed)
-        cmd[2] = yaw_in * float(args.yaw_speed)
-        cmd = _clip_command(cmd, cmd_rng_x, cmd_rng_y, cmd_rng_yaw)
+        if policy_mode != "hierarchical":
+            # RC-style hold behavior: command returns to 0 when keys are released.
+            cmd[0] = vx_in * float(args.x_speed)
+            cmd[1] = vy_in * float(args.y_speed)
+            cmd[2] = yaw_in * float(args.yaw_speed)
+            cmd = _clip_command(cmd, cmd_rng_x, cmd_rng_y, cmd_rng_yaw)
 
-        if bundle is not None and build_obs is not None and obs_hist is not None:
+        if policy_mode == "hierarchical" and bundle is not None and low_level_bundle is not None and build_ll_obs is not None:
+            while data.time >= policy_next_t:
+                if hl_hold_counter <= 0:
+                    obs = _build_high_level_obs(high_level_prev_action)
+                    a_unit_hl = np.asarray(bundle.deterministic_action(obs), dtype=np.float32)[:3]
+                    high_level_prev_action = a_unit_hl.copy()
+                    cmd = _decode_command_action(a_unit_hl, cmd_rng_x, cmd_rng_y, cmd_rng_yaw)
+                    hl_hold_counter = int(hl_hold_steps)
+                    good_feat_now = _current_camera_features(good_geom_id)
+                    if float(good_feat_now["visible"]) > 0.5:
+                        has_last_good_seen = 1.0
+                        last_good_u = float(good_feat_now["u"])
+                        last_good_v = float(good_feat_now["v"])
+                        steps_since_good_seen = 0.0
+                    else:
+                        steps_since_good_seen += 1.0
+                hl_hold_counter -= 1
+
+                ll_base_obs = build_ll_obs(cmd)
+                ll_obs_hist = np.concatenate([ll_obs_hist[1:], ll_base_obs[None, :]], axis=0)
+                ll_obs = ll_obs_hist.reshape(-1)
+                a_unit = np.asarray(low_level_bundle.deterministic_action(ll_obs), dtype=np.float32)[:act_dim]
+                target = action_mid + float(args.action_scale) * action_half * a_unit
+                data.ctrl[:act_dim] = np.clip(target, low, high)
+                policy_next_t += float(args.policy_dt)
+        elif bundle is not None and build_obs is not None and obs_hist is not None:
             while data.time >= policy_next_t:
                 base_obs = build_obs(cmd)
                 obs_hist = np.concatenate([obs_hist[1:], base_obs[None, :]], axis=0)
@@ -1225,6 +1459,10 @@ def main() -> None:
             if collect_ok:
                 tag_collect_count += 1
                 tag_episode_collected += 1
+                has_last_good_seen = 0.0
+                last_good_u = 0.0
+                last_good_v = 0.0
+                steps_since_good_seen = 0.0
                 print(
                     f"[tag-collect] t={data.time:.2f}s count={tag_collect_count} "
                     f"dist={tag_dist:.3f} radius={tag_collect_radius:.3f}"
@@ -1282,51 +1520,54 @@ def main() -> None:
         mj.mjv_updateScene(model, data, opt, None, cam, mj.mjtCatBit.mjCAT_ALL.value, scene)
         mj.mjr_render(viewport, scene, context)
 
-        # Inset camera view.
-        inset_w = int(max(1, args.inset_scale * 640))
-        inset_h = int(max(1, args.inset_scale * 480))
-        inset_x = int(viewport_w - inset_w)
-        inset_y = int(viewport_h - inset_h)
-        inset = mj.MjrRect(inset_x, inset_y, inset_w, inset_h)
-
-        fixed_cam = mj.MjvCamera()
-        fixed_cam.type = mj.mjtCamera.mjCAMERA_FIXED
-        fixed_cam.fixedcamid = camera_id
-        mj.mjv_updateScene(model, data, opt, None, fixed_cam, mj.mjtCatBit.mjCAT_ALL.value, scene)
-        mj.mjr_render(inset, scene, context)
-
         tag_status = "AprilTag: detector disabled"
-        read_pixels = bool(args.show_grayscale) or (tag_detector is not None)
-        if read_pixels and cv2 is not None:
-            rgb = np.zeros((inset_h, inset_w, 3), dtype=np.uint8)
-            depth = np.zeros((inset_h, inset_w), dtype=np.float32)
-            mj.mjr_readPixels(rgb, depth, inset, context)
-            rgb = cv2.flip(rgb, 0)
-            gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-            if use_cv_resize:
-                gray_cv = cv2.resize(gray, (cv_input_w, cv_input_h), interpolation=cv2.INTER_AREA)
-            else:
-                gray_cv = gray
-            if tag_detector is not None:
-                corners, ids, _ = tag_detector.detectMarkers(gray_cv)
-                if ids is None or len(ids) == 0:
-                    tag_status = "AprilTag: NONE"
+        if camera_id >= 0:
+            # Inset camera view.
+            inset_w = int(max(1, args.inset_scale * 640))
+            inset_h = int(max(1, args.inset_scale * 480))
+            inset_x = int(viewport_w - inset_w)
+            inset_y = int(viewport_h - inset_h)
+            inset = mj.MjrRect(inset_x, inset_y, inset_w, inset_h)
+
+            fixed_cam = mj.MjvCamera()
+            fixed_cam.type = mj.mjtCamera.mjCAMERA_FIXED
+            fixed_cam.fixedcamid = camera_id
+            mj.mjv_updateScene(model, data, opt, None, fixed_cam, mj.mjtCatBit.mjCAT_ALL.value, scene)
+            mj.mjr_render(inset, scene, context)
+
+            read_pixels = bool(args.show_grayscale) or (tag_detector is not None)
+            if read_pixels and cv2 is not None:
+                rgb = np.zeros((inset_h, inset_w, 3), dtype=np.uint8)
+                depth = np.zeros((inset_h, inset_w), dtype=np.float32)
+                mj.mjr_readPixels(rgb, depth, inset, context)
+                rgb = cv2.flip(rgb, 0)
+                gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+                if use_cv_resize:
+                    gray_cv = cv2.resize(gray, (cv_input_w, cv_input_h), interpolation=cv2.INTER_AREA)
                 else:
-                    tag_ids = [int(x) for x in ids.reshape(-1).tolist()]
-                    if int(args.good_tag_id) in tag_ids:
-                        tag_status = f"AprilTag: GOOD id={int(args.good_tag_id)}"
-                    elif int(args.bad_tag_id) in tag_ids:
-                        tag_status = f"AprilTag: BAD id={int(args.bad_tag_id)}"
+                    gray_cv = gray
+                if tag_detector is not None:
+                    corners, ids, _ = tag_detector.detectMarkers(gray_cv)
+                    if ids is None or len(ids) == 0:
+                        tag_status = "AprilTag: NONE"
                     else:
-                        tag_status = f"AprilTag: OTHER ids={tag_ids}"
-            if args.show_grayscale:
-                gray_bgr = cv2.cvtColor(gray_cv, cv2.COLOR_GRAY2BGR)
-                if tag_detector is not None and ids is not None and len(ids) > 0:
-                    cv2.aruco.drawDetectedMarkers(gray_bgr, corners, ids)
-                cv2.imshow("camera_grayscale", gray_bgr)
-                cv2.waitKey(1)
-        elif tag_detector is not None:
-            tag_status = "AprilTag: readback unavailable"
+                        tag_ids = [int(x) for x in ids.reshape(-1).tolist()]
+                        if int(args.good_tag_id) in tag_ids:
+                            tag_status = f"AprilTag: GOOD id={int(args.good_tag_id)}"
+                        elif int(args.bad_tag_id) in tag_ids:
+                            tag_status = f"AprilTag: BAD id={int(args.bad_tag_id)}"
+                        else:
+                            tag_status = f"AprilTag: OTHER ids={tag_ids}"
+                if args.show_grayscale:
+                    gray_bgr = cv2.cvtColor(gray_cv, cv2.COLOR_GRAY2BGR)
+                    if tag_detector is not None and ids is not None and len(ids) > 0:
+                        cv2.aruco.drawDetectedMarkers(gray_bgr, corners, ids)
+                    cv2.imshow("camera_grayscale", gray_bgr)
+                    cv2.waitKey(1)
+            elif tag_detector is not None:
+                tag_status = "AprilTag: readback unavailable"
+        else:
+            tag_status = "Camera: unavailable"
 
         camera_feat_lines = []
         if bool(args.show_camera_features):
