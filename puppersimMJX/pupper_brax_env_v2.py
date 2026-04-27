@@ -1261,6 +1261,21 @@ def _build_env_class():
                 "apparent_scale_raw": apparent_scale_raw,
             }
 
+        def _zero_apriltag_camera_features(self, dtype: Any):
+            """Constant AprilTag diagnostics used by non-vision locomotion tasks."""
+            z = jp.asarray(0.0, dtype=dtype)
+            return {
+                "visible": z,
+                "forward_cos": z,
+                "u": z,
+                "v": z,
+                "centering": z,
+                "distance": z,
+                "distance_norm": z,
+                "apparent_scale": z,
+                "apparent_scale_raw": z,
+            }
+
         def _is_occluded_by_room_walls(self, cam_xy: Any, tag_xy: Any, dtype: Any):
             if self._room_wall_rect_count <= 0:
                 return jp.asarray(False)
@@ -1702,28 +1717,22 @@ def _build_env_class():
                 )
             goal_delta = goal_xy - base_xy
             goal_distance = self._goal_distance_to_robot(pipeline_state, goal_xy.astype(q.dtype))
-            apriltag_features = self._apriltag_camera_features(
-                pipeline_state=pipeline_state,
-                goal_xy=goal_xy.astype(q.dtype),
-                dtype=q.dtype,
-            )
-            if self._apriltag_use_bad_tag:
+            if self._reward_mode == "apriltag_walls":
+                apriltag_features = self._apriltag_camera_features(
+                    pipeline_state=pipeline_state,
+                    goal_xy=goal_xy.astype(q.dtype),
+                    dtype=q.dtype,
+                )
+            else:
+                apriltag_features = self._zero_apriltag_camera_features(dtype=q.dtype)
+            if self._reward_mode == "apriltag_walls" and self._apriltag_use_bad_tag:
                 apriltag_bad_features = self._apriltag_camera_features(
                     pipeline_state=pipeline_state,
                     goal_xy=self._apriltag_bad_goal_xy(dtype=q.dtype),
                     dtype=q.dtype,
                 )
             else:
-                z = jp.asarray(0.0, dtype=q.dtype)
-                apriltag_bad_features = {
-                    "visible": z,
-                    "forward_cos": z,
-                    "u": z,
-                    "v": z,
-                    "centering": z,
-                    "distance": z,
-                    "distance_norm": z,
-                }
+                apriltag_bad_features = self._zero_apriltag_camera_features(dtype=q.dtype)
 
             ll_hist = jp.zeros((1, 1), dtype=q.dtype)
             if self._use_nav_controller:
@@ -1961,27 +1970,22 @@ def _build_env_class():
                     good_wall_normal=apriltag_wall_normal.astype(action.dtype),
                     dtype=action.dtype,
                 )
-            apriltag_features = self._apriltag_camera_features(
-                pipeline_state=pipeline_state,
-                goal_xy=goal_xy.astype(action.dtype),
-                dtype=action.dtype,
-            )
-            if self._apriltag_use_bad_tag:
+            if self._reward_mode == "apriltag_walls":
+                apriltag_features = self._apriltag_camera_features(
+                    pipeline_state=pipeline_state,
+                    goal_xy=goal_xy.astype(action.dtype),
+                    dtype=action.dtype,
+                )
+            else:
+                apriltag_features = self._zero_apriltag_camera_features(dtype=action.dtype)
+            if self._reward_mode == "apriltag_walls" and self._apriltag_use_bad_tag:
                 apriltag_bad_features = self._apriltag_camera_features(
                     pipeline_state=pipeline_state,
                     goal_xy=self._apriltag_bad_goal_xy(dtype=action.dtype),
                     dtype=action.dtype,
                 )
             else:
-                z = jp.asarray(0.0, dtype=action.dtype)
-                apriltag_bad_features = {
-                    "visible": z,
-                    "forward_cos": z,
-                    "u": z,
-                    "v": z,
-                    "centering": z,
-                    "distance_norm": z,
-                }
+                apriltag_bad_features = self._zero_apriltag_camera_features(dtype=action.dtype)
             apriltag_active_prev = state.info.get("apriltag_active", jp.asarray(1.0, dtype=action.dtype))
             if self._reward_mode == "apriltag_walls":
                 apriltag_features = {k: v * apriltag_active_prev.astype(v.dtype) for k, v in apriltag_features.items()}
@@ -2195,28 +2199,22 @@ def _build_env_class():
                 apriltag_active = apriltag_active_prev.astype(reward.dtype)
                 tag_collected_now = jp.asarray(False)
 
-            apriltag_features = self._apriltag_camera_features(
-                pipeline_state=pipeline_state,
-                goal_xy=goal_xy.astype(reward.dtype),
-                dtype=reward.dtype,
-            )
-            if self._apriltag_use_bad_tag:
+            if self._reward_mode == "apriltag_walls":
+                apriltag_features = self._apriltag_camera_features(
+                    pipeline_state=pipeline_state,
+                    goal_xy=goal_xy.astype(reward.dtype),
+                    dtype=reward.dtype,
+                )
+            else:
+                apriltag_features = self._zero_apriltag_camera_features(dtype=reward.dtype)
+            if self._reward_mode == "apriltag_walls" and self._apriltag_use_bad_tag:
                 apriltag_bad_features = self._apriltag_camera_features(
                     pipeline_state=pipeline_state,
                     goal_xy=self._apriltag_bad_goal_xy(dtype=reward.dtype),
                     dtype=reward.dtype,
                 )
             else:
-                z = jp.asarray(0.0, dtype=reward.dtype)
-                apriltag_bad_features = {
-                    "visible": z,
-                    "forward_cos": z,
-                    "u": z,
-                    "v": z,
-                    "centering": z,
-                    "distance": z,
-                    "distance_norm": z,
-                }
+                apriltag_bad_features = self._zero_apriltag_camera_features(dtype=reward.dtype)
 
             if self._reward_mode == "apriltag_walls":
                 has_last_good_seen_prev = state.info.get("has_last_good_seen", jp.asarray(0.0, dtype=reward.dtype))
