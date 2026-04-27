@@ -7,3 +7,6 @@ runs/
 videos/
 wandb/
 .codex
+reports/
+videos_old/
+runs_old/
