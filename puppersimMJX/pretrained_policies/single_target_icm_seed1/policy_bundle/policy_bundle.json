@@ -1,0 +1,22 @@
+{
+  "source_params_path": "puppersimMJX/pretrained_policies/single_target_icm_seed1/puppermjx_train_ppo.npz",
+  "activation": "elu",
+  "obs_dim": 11,
+  "action_dim": 3,
+  "policy_output_dim": 6,
+  "hidden_sizes": [
+    256,
+    128,
+    128,
+    128
+  ],
+  "layer_names": [
+    "hidden_0",
+    "hidden_1",
+    "hidden_2",
+    "hidden_3",
+    "hidden_4"
+  ],
+  "action_head": "normal_tanh",
+  "notes": "Use with puppersimMJX/pupper_brax_policy_bundle.py for deterministic inference."
+}

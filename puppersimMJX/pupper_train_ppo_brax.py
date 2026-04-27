@@ -12,7 +12,7 @@ import time
 from collections import deque
 from collections.abc import Mapping as CbMapping
 from collections.abc import Sequence as CbSequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
@@ -43,13 +43,32 @@ class Args:
     """the wandb project name"""
     wandb_entity: Optional[str] = None
     """wandb entity (team/user)"""
+    wandb_log_mode: str = "task"
+    """wandb metric logging mode: task or all"""
+    wandb_task_metric_keys: str = (
+        "eval/episode_reward,"
+        "eval/episode_reward_std,"
+        "eval/episode_goals_collected,"
+        "eval/episode_goal_distance,"
+        "eval/episode_collect_streak,"
+        "eval/episode_apriltag_visible,"
+        "train/icm_reward,"
+        "train/icm_reward_weight,"
+        "train/icm_forward_loss,"
+        "train/icm_inverse_loss,"
+        "train/icm_total_loss,"
+        "avg_reward,"
+        "success rate,"
+        "sps"
+    )
+    """comma-separated metric keys to keep when wandb_log_mode=task"""
     save_model: bool = True
     """save final parameters under runs/{run_name}"""
     save_checkpoints: bool = True
     """save periodic checkpoints during training when callback is supported"""
     params_format: str = "npz"
     """parameter serialization format: npz, flax-bytes, or pickle"""
-    checkpoint_interval: int = 10_000_000
+    checkpoint_interval: int = 100_000_000
     """save a checkpoint every N environment steps"""
     checkpoint_dirname: str = "checkpoints"
     """subdirectory under runs/{run_name} for periodic checkpoints"""
@@ -79,6 +98,10 @@ class Args:
     """episode length"""
     eval_interval: int = 5_000_000
     """target interval in env steps between eval/log updates"""
+    log_training_metrics: bool = True
+    """ask Brax PPO to emit train/* metrics, including ICM metrics when enabled"""
+    training_metrics_steps: int = 0
+    """target interval in env steps for train/* metrics (<=0 uses eval_interval)"""
     reward_scaling: float = 1.0
     """reward scaling used by Brax PPO"""
     normalize_observations: bool = True
@@ -96,13 +119,43 @@ class Args:
     learning_rate: float = 3e-4
     """optimizer learning rate"""
     learning_rate_schedule: str = "constant"
-    """learning rate schedule: constant or linear"""
+    """learning-rate schedule: constant, linear, cosine, exp, adaptive_kl"""
+    learning_rate_final: float = 1e-5
+    """final learning rate for linear/cosine/exp schedules"""
+    learning_rate_anneal_steps: int = 0
+    """annealing horizon in env steps for linear/cosine/exp (<=0 uses num_timesteps)"""
+    learning_rate_schedule_min_lr: float = 1e-5
+    """minimum LR bound for adaptive_kl schedule"""
+    learning_rate_schedule_max_lr: float = 1e-2
+    """maximum LR bound for adaptive_kl schedule"""
     entropy_cost: float = 1e-2
     """entropy regularization coefficient"""
     num_envs: int = 8192
     """number of parallel environments"""
     batch_size: int = 256
     """training batch size"""
+    icm_enabled: bool = False
+    """enable intrinsic curiosity module (ICM) reward shaping ablation"""
+    icm_feature_dim: int = 64
+    """ICM latent feature size"""
+    icm_hidden_dim: int = 128
+    """ICM hidden layer width"""
+    icm_learning_rate: float = 3e-4
+    """ICM optimizer learning rate"""
+    icm_beta: float = 0.2
+    """ICM loss blend: total=(1-beta)*inverse + beta*forward"""
+    icm_eta: float = 1.0
+    """scales raw forward prediction error into intrinsic reward"""
+    icm_reward_weight: float = 0.05
+    """initial multiplier applied to intrinsic reward before adding to extrinsic reward"""
+    icm_reward_weight_final: float = 0.0
+    """final intrinsic reward multiplier at schedule end"""
+    icm_anneal_steps: int = 0
+    """annealing horizon in environment steps for icm_reward_weight (<=0 uses num_timesteps)"""
+    icm_anneal_schedule: str = "linear"
+    """anneal schedule: linear, cosine, exp, or none"""
+    icm_reward_clip: float = 0.0
+    """optional clip for intrinsic reward (<=0 disables clipping)"""
 
     network_hidden_sizes: str = "256,128,128,128"
     """comma-separated hidden layer sizes for the policy/value MLP"""
@@ -118,7 +171,7 @@ class Args:
     """save/log a training video every N env steps (when callback runs)"""
     video_steps: int = 1000
     """number of env steps to render in the saved video"""
-    video_width: int = 640
+    video_width: int = 480
     """video width in pixels"""
     video_height: int = 480
     """video height in pixels"""
@@ -146,6 +199,28 @@ class Args:
     """video fps (<=0 means inferred from env.dt)"""
     video_dirname: str = "videos"
     """base directory for saved videos"""
+    capture_report: bool = False
+    """whether to save a composite rollout report image"""
+    capture_report_during_training: bool = False
+    """whether to save periodic rollout report images during training"""
+    report_eval_interval: int = 10_000_000
+    """save/log a rollout report image every N env steps (when callback runs)"""
+    report_steps: int = 1500
+    """number of env steps to roll out when generating each report"""
+    report_num_stages: int = 4
+    """number of stage snapshots shown in each report"""
+    report_front_camera_name: str = "front_cam"
+    """camera name for report front-view panel; empty disables camera panel"""
+    report_topdown_camera_name: str = "tracking_cam"
+    """camera name for report top-down background overlay; empty disables overlay"""
+    report_map_margin: float = 0.25
+    """xy padding (meters) around inferred map bounds in report plots"""
+    report_dirname: str = "reports"
+    """base directory for saved report images"""
+    report_num_rollouts: int = 1
+    """number of independent rollout seeds to aggregate per report image"""
+    report_seed_stride: int = 1009
+    """seed increment between aggregated rollout reports"""
 
 
 def _slugify_name(value: str) -> str:
@@ -223,6 +298,34 @@ def _parse_profile(raw: str) -> Dict[str, Any]:
     return dict(data)
 
 
+def _apply_profile_train_overrides(args: Args, profile: Mapping[str, Any]) -> Args:
+    overrides = profile.get("train_overrides")
+    if overrides is None:
+        return args
+    if not isinstance(overrides, Mapping):
+        raise ValueError("profile field 'train_overrides' must be a JSON object/dict.")
+
+    defaults = Args()
+    valid_fields = {f.name for f in fields(Args)}
+    applied: Dict[str, Any] = {}
+    for key, value in overrides.items():
+        key_str = str(key)
+        if key_str not in valid_fields:
+            raise ValueError(f"Unknown train_overrides key '{key_str}'.")
+        current_value = getattr(args, key_str)
+        default_value = getattr(defaults, key_str)
+        # CLI args should keep precedence over profile defaults.
+        if current_value != default_value:
+            continue
+        setattr(args, key_str, value)
+        applied[key_str] = value
+
+    if applied:
+        applied_summary = ", ".join(f"{k}={applied[k]}" for k in sorted(applied))
+        print(f"info: applied profile train_overrides: {applied_summary}")
+    return args
+
+
 def _resolve_profile_dict(value: Any, field_name: str) -> Dict[str, Any]:
     if value is None:
         return {}
@@ -262,6 +365,53 @@ def _as_float(value: Any) -> Optional[float]:
         return None
 
 
+def _parse_csv_set(spec: str) -> set[str]:
+    return {x.strip() for x in str(spec or "").split(",") if x.strip()}
+
+
+def _filter_wandb_metrics(metric_floats: Mapping[str, float], args: Args) -> Dict[str, float]:
+    mode = str(args.wandb_log_mode or "task").strip().lower()
+    if mode == "all":
+        return dict(metric_floats)
+    if mode != "task":
+        raise ValueError("wandb_log_mode must be one of: task, all")
+
+    explicit_keep = _parse_csv_set(args.wandb_task_metric_keys)
+    out: Dict[str, float] = {}
+    for key, value in metric_floats.items():
+        if key in explicit_keep:
+            out[key] = value
+            continue
+        # Keep canonical reward and optimization health metrics.
+        if key in ("eval/episode_reward", "train/episode_reward"):
+            out[key] = value
+            continue
+        if key in {"sps", "train/icm_reward_weight"}:
+            out[key] = value
+            continue
+        # Drop decomposed reward components by default, except ICM metrics.
+        if ("reward_" in key) and ("icm_" not in key) and (not key.endswith("reward_task")):
+            continue
+        # Keep task-centric metrics.
+        if any(
+            token in key
+            for token in (
+                "goal_distance",
+                "goals_collected",
+                "goal_reached",
+                "collect_streak",
+                "apriltag_visible",
+                "distance_progress_reward",
+                "visibility_gate_reward",
+                "avg_reward",
+                "success rate",
+                "icm_",
+            )
+        ):
+            out[key] = value
+    return out
+
+
 def _simplify_metric_key(key: str) -> str:
     raw = str(key).strip().strip("/")
     if raw.startswith("training/"):
@@ -292,23 +442,98 @@ def _activation_fn(name: str):
 def _resolve_learning_rate(
     schedule_name: str,
     base_learning_rate: float,
+    final_learning_rate: float,
+    anneal_steps: int,
     total_timesteps: int,
+    adaptive_kl_min_lr: float,
+    adaptive_kl_max_lr: float,
 ):
+    import optax
+
+    class _ScheduleWithScalarFallback:
+        """Callable Optax schedule that can also be cast to scalar for Brax logging."""
+
+        def __init__(self, init_lr: float, schedule_fn: Callable[[Any], Any]):
+            self._init_lr = float(init_lr)
+            self._schedule_fn = schedule_fn
+
+        def __call__(self, count):
+            return self._schedule_fn(count)
+
+        def __array__(self, dtype=None):
+            return np.asarray(self._init_lr, dtype=dtype)
+
+        def __float__(self):
+            return float(self._init_lr)
+
     schedule = str(schedule_name or "constant").strip().lower()
     base_lr = float(base_learning_rate)
     if base_lr <= 0:
         raise ValueError("learning_rate must be > 0.")
+    final_lr = float(final_learning_rate)
+    if final_lr < 0:
+        raise ValueError("learning_rate_final must be >= 0.")
+    transition_steps = int(anneal_steps)
+    if transition_steps <= 0:
+        transition_steps = int(total_timesteps)
+    transition_steps = max(1, transition_steps)
     if schedule == "constant":
-        return base_lr
+        return {
+            "learning_rate": base_lr,
+            "learning_rate_schedule": None,
+            "learning_rate_schedule_min_lr": None,
+            "learning_rate_schedule_max_lr": None,
+        }
     if schedule == "linear":
-        # Brax PPO versions that cast `learning_rate` with `jnp.array(...)`
-        # only accept scalar values, not callables/schedules.
-        print(
-            "warning: learning_rate_schedule=linear requested, but this Brax PPO "
-            "version expects scalar learning_rate. Falling back to constant."
+        schedule_fn = optax.linear_schedule(
+            init_value=base_lr,
+            end_value=final_lr,
+            transition_steps=transition_steps,
         )
-        return base_lr
-    raise ValueError("learning_rate_schedule must be one of: constant, linear")
+        return {
+            "learning_rate": _ScheduleWithScalarFallback(base_lr, schedule_fn),
+            "learning_rate_schedule": None,
+            "learning_rate_schedule_min_lr": None,
+            "learning_rate_schedule_max_lr": None,
+        }
+    if schedule == "cosine":
+        alpha = (final_lr / base_lr) if base_lr > 0 else 0.0
+        alpha = float(np.clip(alpha, 0.0, 1.0))
+        schedule_fn = optax.cosine_decay_schedule(
+            init_value=base_lr,
+            decay_steps=transition_steps,
+            alpha=alpha,
+        )
+        return {
+            "learning_rate": _ScheduleWithScalarFallback(base_lr, schedule_fn),
+            "learning_rate_schedule": None,
+            "learning_rate_schedule_min_lr": None,
+            "learning_rate_schedule_max_lr": None,
+        }
+    if schedule == "exp":
+        safe_final_lr = max(final_lr, 1e-12)
+        decay_rate = float(np.clip(safe_final_lr / base_lr, 1e-12, 1.0))
+        schedule_fn = optax.exponential_decay(
+            init_value=base_lr,
+            transition_steps=transition_steps,
+            decay_rate=decay_rate,
+            staircase=False,
+            end_value=safe_final_lr,
+        )
+        return {
+            "learning_rate": _ScheduleWithScalarFallback(base_lr, schedule_fn),
+            "learning_rate_schedule": None,
+            "learning_rate_schedule_min_lr": None,
+            "learning_rate_schedule_max_lr": None,
+        }
+    if schedule in {"adaptive_kl", "adaptive-kl"}:
+        return {
+            "learning_rate": base_lr,
+            "learning_rate_schedule": "adaptive_kl",
+            "learning_rate_schedule_min_lr": float(adaptive_kl_min_lr),
+            "learning_rate_schedule_max_lr": float(adaptive_kl_max_lr),
+        }
+    raise ValueError("learning_rate_schedule must be one of: constant, linear, cosine, exp, adaptive_kl")
 
 
 def _save_params(path: Path, params: Any) -> str:
@@ -403,6 +628,62 @@ def _resolve_ppo_train_callable(ppo_train_obj: Any) -> Callable[..., Any]:
     )
 
 
+def _make_wrap_env_fn(
+    *,
+    args: Args,
+    eval_env_ref: Any,
+) -> Optional[Callable[..., Any]]:
+    if not args.icm_enabled:
+        return None
+
+    from brax.envs.wrappers.training import (
+        AutoResetWrapper,
+        DomainRandomizationVmapWrapper,
+        EpisodeWrapper,
+        VmapWrapper,
+    )
+
+    from puppersimMJX.icm_wrapper import ICMConfig, ICMWrapper
+
+    effective_icm_anneal_steps = int(args.icm_anneal_steps)
+    if effective_icm_anneal_steps <= 0:
+        effective_icm_anneal_steps = int(args.num_timesteps)
+
+    icm_config = ICMConfig(
+        enabled=bool(args.icm_enabled),
+        feature_dim=int(args.icm_feature_dim),
+        hidden_dim=int(args.icm_hidden_dim),
+        learning_rate=float(args.icm_learning_rate),
+        beta=float(args.icm_beta),
+        eta=float(args.icm_eta),
+        reward_weight=float(args.icm_reward_weight),
+        reward_weight_final=float(args.icm_reward_weight_final),
+        anneal_steps=effective_icm_anneal_steps,
+        anneal_schedule=str(args.icm_anneal_schedule),
+        reward_clip=float(args.icm_reward_clip),
+    )
+
+    def wrap_env_fn(
+        env: Any,
+        episode_length: int = 1000,
+        action_repeat: int = 1,
+        randomization_fn: Optional[Callable[..., Any]] = None,
+    ):
+        if randomization_fn is None:
+            wrapped = VmapWrapper(env)
+        else:
+            wrapped = DomainRandomizationVmapWrapper(env, randomization_fn)
+        # Keep eval metrics comparable to baseline by leaving eval reward unshaped.
+        use_icm = env is not eval_env_ref
+        if use_icm:
+            wrapped = ICMWrapper(wrapped, config=icm_config, seed=int(args.seed) + 4242)
+        wrapped = EpisodeWrapper(wrapped, int(episode_length), int(action_repeat))
+        wrapped = AutoResetWrapper(wrapped)
+        return wrapped
+
+    return wrap_env_fn
+
+
 def _save_rollout_video_from_policy_builder(
     env: Any,
     make_policy_builder: Callable[..., Any],
@@ -441,6 +722,7 @@ def _save_rollout_video_from_policy_builder(
     policy = jax.jit(policy)
 
     goal_positions_xy: list[np.ndarray] = []
+    apriltag_wall_ids: list[Optional[int]] = []
 
     if randomize_goal_marker:
         try:
@@ -471,6 +753,8 @@ def _save_rollout_video_from_policy_builder(
     state = reset_fn(reset_rng)
     rollout = [state.pipeline_state]
     goal_positions_xy.append(np.asarray(state.info.get("goal_position", jp.zeros((2,), dtype=state.obs.dtype))))
+    wall0 = state.info.get("apriltag_wall_id", None)
+    apriltag_wall_ids.append(None if wall0 is None else int(np.asarray(wall0)))
 
     for _ in range(max(1, int(num_steps))):
         rng, policy_rng = jax.random.split(rng)
@@ -478,12 +762,20 @@ def _save_rollout_video_from_policy_builder(
         state = step_fn(state, action)
         rollout.append(state.pipeline_state)
         goal_positions_xy.append(np.asarray(state.info.get("goal_position", jp.zeros((2,), dtype=state.obs.dtype))))
+        wall_i = state.info.get("apriltag_wall_id", None)
+        apriltag_wall_ids.append(None if wall_i is None else int(np.asarray(wall_i)))
         done_flag = float(np.asarray(state.done))
         if done_flag >= 0.5:
             rng, reset_rng = jax.random.split(rng)
             state = reset_fn(reset_rng)
             rollout.append(state.pipeline_state)
             goal_positions_xy.append(np.asarray(state.info.get("goal_position", jp.zeros((2,), dtype=state.obs.dtype))))
+            wall_r = state.info.get("apriltag_wall_id", None)
+            apriltag_wall_ids.append(None if wall_r is None else int(np.asarray(wall_r)))
+
+    wall_ids_seen = sorted({wid for wid in apriltag_wall_ids if wid is not None})
+    if wall_ids_seen:
+        print(f"video rollout apriltag_wall_ids_seen={wall_ids_seen}")
 
     render_kwargs = {
         "height": int(height),
@@ -548,7 +840,9 @@ def _save_rollout_video_from_policy_builder(
 
         site_id = int(mj.mj_name2id(m, mj.mjtObj.mjOBJ_SITE, goal_marker_site_name))
         if site_id < 0:
-            raise RuntimeError(f"site '{goal_marker_site_name}' not found in MuJoCo model")
+            # Some apriltag profiles do not define a separate goal-marker site.
+            # Keep rendering (and geom pose sync) active even without this site.
+            site_id = -1
 
         cam_id = -1
         if camera_name:
@@ -558,6 +852,15 @@ def _save_rollout_video_from_policy_builder(
 
         if len(goal_positions_xy) != len(rollout):
             raise RuntimeError("goal/rollout length mismatch")
+
+        good_geom_id = int(mj.mj_name2id(m, mj.mjtObj.mjOBJ_GEOM, "apriltag_good_panel"))
+        bad_geom_id = int(mj.mj_name2id(m, mj.mjtObj.mjOBJ_GEOM, "apriltag_bad_panel"))
+        ps_good_geom_idx = int(getattr(env, "_apriltag_good_geom_idx", -1))
+        ps_bad_geom_idx = int(getattr(env, "_apriltag_bad_geom_idx", -1))
+        if good_geom_id >= 0 and ps_good_geom_idx < 0:
+            ps_good_geom_idx = good_geom_id
+        if bad_geom_id >= 0 and ps_bad_geom_idx < 0:
+            ps_bad_geom_idx = bad_geom_id
 
         out_frames = []
         try:
@@ -571,9 +874,28 @@ def _save_rollout_video_from_policy_builder(
 
                 d.qpos[:] = q
                 d.qvel[:] = qd
-                m.site_pos[site_id, 0] = float(np.asarray(gxy)[0])
-                m.site_pos[site_id, 1] = float(np.asarray(gxy)[1])
-                m.site_pos[site_id, 2] = float(goal_marker_z)
+                if site_id >= 0:
+                    m.site_pos[site_id, 0] = float(np.asarray(gxy)[0])
+                    m.site_pos[site_id, 1] = float(np.asarray(gxy)[1])
+                    m.site_pos[site_id, 2] = float(goal_marker_z)
+
+                # Keep AprilTag panel render aligned with env pipeline_state.
+                if hasattr(pstate, "geom_xpos") and hasattr(pstate, "geom_xmat"):
+                    for gid, ps_idx in (
+                        (good_geom_id, ps_good_geom_idx),
+                        (bad_geom_id, ps_bad_geom_idx),
+                    ):
+                        if gid < 0 or ps_idx < 0:
+                            continue
+                        if ps_idx >= int(pstate.geom_xpos.shape[0]) or ps_idx >= int(pstate.geom_xmat.shape[0]):
+                            continue
+                        gpos = np.asarray(pstate.geom_xpos[ps_idx], dtype=np.float64).reshape(-1)
+                        gmat = np.asarray(pstate.geom_xmat[ps_idx], dtype=np.float64).reshape(-1)
+                        if gpos.shape[0] >= 3 and gmat.shape[0] >= 9:
+                            m.geom_pos[gid, :] = gpos[:3]
+                            q_geom = np.zeros(4, dtype=np.float64)
+                            mj.mju_mat2Quat(q_geom, gmat[:9])
+                            m.geom_quat[gid, :] = q_geom
                 mj.mj_forward(m, d)
 
                 if cam_id >= 0:
@@ -588,25 +910,52 @@ def _save_rollout_video_from_policy_builder(
                 pass
         return out_frames
 
+    reward_mode = str(getattr(env, "_reward_mode", "")).strip().lower()
+    prefer_mujoco_renderer = reward_mode == "apriltag_walls"
+
     goal_sync_active = False
     goal_sync_backend = "none"  # one of: none, brax, mujoco
     if sync_goal_marker_to_collectible:
-        try:
-            frames = _render_with_synced_goal(camera_name=camera, frame_w=int(width), frame_h=int(height))
-            goal_sync_active = True
-            goal_sync_backend = "brax"
-        except Exception as exc:
-            print(f"warning: goal marker sync disabled ({exc})")
+        if prefer_mujoco_renderer:
             try:
                 frames = _render_with_mujoco_goal_sync(camera_name=camera, frame_w=int(width), frame_h=int(height))
                 goal_sync_active = True
                 goal_sync_backend = "mujoco"
-                print("info: using MuJoCo fallback renderer for goal-marker sync")
-            except Exception as exc2:
-                print(f"warning: MuJoCo goal sync fallback disabled ({exc2})")
-                frames = env.render(rollout, **render_kwargs)
+                print("info: using MuJoCo renderer for apriltag_walls goal + geom sync")
+            except Exception as exc:
+                print(f"warning: MuJoCo apriltag renderer failed ({exc})")
+                try:
+                    frames = _render_with_synced_goal(camera_name=camera, frame_w=int(width), frame_h=int(height))
+                    goal_sync_active = True
+                    goal_sync_backend = "brax"
+                except Exception as exc2:
+                    print(f"warning: goal marker sync disabled ({exc2})")
+                    frames = env.render(rollout, **render_kwargs)
+        else:
+            try:
+                frames = _render_with_synced_goal(camera_name=camera, frame_w=int(width), frame_h=int(height))
+                goal_sync_active = True
+                goal_sync_backend = "brax"
+            except Exception as exc:
+                print(f"warning: goal marker sync disabled ({exc})")
+                try:
+                    frames = _render_with_mujoco_goal_sync(camera_name=camera, frame_w=int(width), frame_h=int(height))
+                    goal_sync_active = True
+                    goal_sync_backend = "mujoco"
+                    print("info: using MuJoCo fallback renderer for goal-marker sync")
+                except Exception as exc2:
+                    print(f"warning: MuJoCo goal sync fallback disabled ({exc2})")
+                    frames = env.render(rollout, **render_kwargs)
     else:
-        frames = env.render(rollout, **render_kwargs)
+        if prefer_mujoco_renderer:
+            try:
+                frames = _render_with_mujoco_goal_sync(camera_name=camera, frame_w=int(width), frame_h=int(height))
+                print("info: using MuJoCo renderer for apriltag_walls geom sync")
+            except Exception as exc:
+                print(f"warning: MuJoCo apriltag renderer failed ({exc})")
+                frames = env.render(rollout, **render_kwargs)
+        else:
+            frames = env.render(rollout, **render_kwargs)
 
     if front_camera_inset and front_camera_name:
         try:
@@ -695,6 +1044,7 @@ if __name__ == "__main__":
     random.seed(args.seed)
     np.random.seed(args.seed)
     profile = _parse_profile(args.profile)
+    args = _apply_profile_train_overrides(args, profile)
     task_name = _resolve_task_name(args, profile)
     run_name = _build_run_name(task_name)
     wandb_run_name = task_name
@@ -737,6 +1087,10 @@ if __name__ == "__main__":
                 save_code=True,
             )
             wandb = _wandb
+            print(
+                "info: wandb logging mode: "
+                f"{args.wandb_log_mode} (task_keys={args.wandb_task_metric_keys})"
+            )
         except Exception as exc:
             print(f"wandb init failed, disabling tracking: {exc}")
 
@@ -770,6 +1124,17 @@ if __name__ == "__main__":
     if "regenerate_mjcf_if_exists" in eval_env_kwargs:
         eval_env_kwargs["regenerate_mjcf_if_exists"] = False
     eval_env = envs.get_environment(args.env_name, **eval_env_kwargs)
+    wrap_env_fn = _make_wrap_env_fn(args=args, eval_env_ref=eval_env)
+    if args.icm_enabled:
+        effective_icm_anneal_steps = int(args.icm_anneal_steps) if int(args.icm_anneal_steps) > 0 else int(args.num_timesteps)
+        print(
+            "ICM enabled: "
+            f"feature_dim={args.icm_feature_dim}, hidden_dim={args.icm_hidden_dim}, "
+            f"lr={args.icm_learning_rate}, beta={args.icm_beta}, eta={args.icm_eta}, "
+            f"weight={args.icm_reward_weight}->{args.icm_reward_weight_final}, "
+            f"anneal={args.icm_anneal_schedule}/{effective_icm_anneal_steps}, "
+            f"clip={args.icm_reward_clip}"
+        )
 
     activation = _activation_fn(args.activation)
     hidden_sizes = _parse_hidden_sizes(args.network_hidden_sizes)
@@ -792,68 +1157,187 @@ if __name__ == "__main__":
     checkpoint_state = {"next_step": max(1, int(args.checkpoint_interval))}
     eval_log_state = {"next_step": 0}
     video_state = {
-        "next_step": 0,
+        "next_step": max(1, int(args.video_eval_interval)),
+        "initial_saved": False,
+    }
+    report_state = {
+        "next_step": max(1, int(args.report_eval_interval)),
+        "initial_saved": False,
     }
     log_state = {"max_step": 0}
-    train_reward_window = deque(maxlen=10)
     reward_window = deque(maxlen=10)
+    success_window = deque(maxlen=10)
     last_video_state: Dict[str, Optional[Path]] = {"path": None}
+    last_report_state: Dict[str, Optional[Path]] = {"path": None}
+    video_seed_rng = np.random.default_rng(int(args.seed) + 20260423)
+    report_seed_rng = np.random.default_rng(int(args.seed) + 20260424)
 
     training_start = time.time()
+    metric_prefixes_to_log = ("train/", "eval/")
+    success_metric_candidates = (
+        "eval/episode_goal_reached",
+        "train/episode_goal_reached",
+        "eval/episode_goal_reached_current",
+        "train/episode_goal_reached_current",
+        "eval/goal_reached",
+        "train/goal_reached",
+        "eval/goal_reached_current",
+        "train/goal_reached_current",
+        "eval/episode_goals_collected",
+        "train/episode_goals_collected",
+        "eval/goals_collected",
+        "train/goals_collected",
+    )
 
     def progress_fn(num_steps: int, metrics: Mapping[str, Any]):
         step = int(num_steps)
         log_state["max_step"] = max(log_state["max_step"], step)
-        if step < eval_log_state["next_step"]:
-            return
-        while eval_log_state["next_step"] <= step:
-            eval_log_state["next_step"] += max(1, int(args.eval_interval))
 
         elapsed = max(1e-6, time.time() - training_start)
         sps = int(step / elapsed)
         writer.add_scalar("sps", sps, step)
         wandb_payload = {"sps": sps, "num_steps": step}
+        simplified_metrics: Dict[str, float] = {}
         for key, value in metrics.items():
             scalar_value = _as_float(value)
             if scalar_value is None:
                 continue
             metric_key = _simplify_metric_key(key)
+            if not metric_key.startswith(metric_prefixes_to_log):
+                continue
+            simplified_metrics[metric_key] = scalar_value
             writer.add_scalar(metric_key, scalar_value, step)
             wandb_payload[metric_key] = scalar_value
-            if key == "training/episode_reward" or metric_key == "train/episode_reward":
-                train_reward_window.append(scalar_value)
+            if metric_key == "train/episode_reward":
                 reward_window.append(scalar_value)
             elif metric_key == "eval/episode_reward":
                 reward_window.append(scalar_value)
-        if not train_reward_window:
-            fallback_train_reward = _as_float(metrics.get("training/episode_reward"))
-            if fallback_train_reward is not None:
-                train_reward_window.append(fallback_train_reward)
-                reward_window.append(fallback_train_reward)
-        if train_reward_window:
-            avg10 = float(np.mean(train_reward_window))
-            writer.add_scalar("train/avg_episode_reward", avg10, step)
-            wandb_payload["train/avg_episode_reward"] = avg10
-        elif reward_window:
-            # Fallback when Brax does not report training/episode_reward at this step.
+        for candidate in success_metric_candidates:
+            success_value = simplified_metrics.get(candidate)
+            if success_value is not None:
+                if "goals_collected" in candidate:
+                    success_window.append(1.0 if float(success_value) > 0.0 else 0.0)
+                else:
+                    success_window.append(float(success_value))
+                break
+        if reward_window:
             avg10 = float(np.mean(reward_window))
-            writer.add_scalar("train/avg_episode_reward", avg10, step)
-            wandb_payload["train/avg_episode_reward"] = avg10
+            writer.add_scalar("avg_reward", avg10, step)
+            wandb_payload["avg_reward"] = avg10
+        if success_window:
+            success_rate10 = float(np.mean(success_window))
+            writer.add_scalar("success rate", success_rate10, step)
+            wandb_payload["success rate"] = success_rate10
         if wandb is not None:
             try:
-                wandb.log(wandb_payload, step=step)
+                payload = _filter_wandb_metrics(wandb_payload, args)
+                payload["num_steps"] = int(step)
+                wandb.log(payload, step=step)
             except Exception as exc:
                 print(f"wandb.log failed at step={step}: {exc}")
-        reward_keys = ("eval/episode_reward", "eval/episode_reward_std", "training/episode_reward")
-        reward_summary = ", ".join(
-            [f"{key}={_as_float(metrics.get(key)):.3f}" for key in reward_keys if _as_float(metrics.get(key)) is not None]
+        summary_keys = (
+            "eval/episode_reward",
+            "eval/episode_reward_std",
+            "train/episode_reward",
+            "train/kl_mean",
+            "train/icm_reward",
+            "train/icm_reward_weight",
+            "train/icm_forward_loss",
         )
-        suffix = f", {reward_summary}" if reward_summary else ""
+        summary_parts = [
+            f"{key}={simplified_metrics[key]:.3f}"
+            for key in summary_keys
+            if key in simplified_metrics
+        ]
+        suffix = f", {', '.join(summary_parts)}" if summary_parts else ""
         print(f"num_steps={num_steps}, SPS={sps}{suffix}")
 
     def policy_params_fn(current_step: int, _make_policy: Callable[..., Any], params: Any):
         step = int(current_step)
         log_state["max_step"] = max(log_state["max_step"], step)
+
+        if args.capture_video and not bool(video_state["initial_saved"]):
+            initial_video_path = (
+                Path(args.video_dirname)
+                / run_name
+                / f"{save_prefix}_initial.mp4"
+            )
+            _save_rollout_video_from_policy_builder(
+                env=eval_env,
+                make_policy_builder=_make_policy,
+                params=params,
+                seed=int(video_seed_rng.integers(0, 2**31 - 1)),
+                output_path=initial_video_path,
+                num_steps=args.video_steps,
+                width=args.video_width,
+                height=args.video_height,
+                camera=args.video_camera or None,
+                front_camera_inset=bool(args.video_front_camera_inset),
+                front_camera_name=(args.video_front_camera_name or None),
+                front_inset_scale=float(args.video_front_inset_scale),
+                randomize_goal_marker=bool(args.video_randomize_goal_marker),
+                goal_marker_site_name=str(args.video_goal_marker_site_name),
+                goal_marker_radius_min=float(args.video_goal_marker_radius_min),
+                goal_marker_radius_max=float(args.video_goal_marker_radius_max),
+                goal_marker_z=float(args.video_goal_marker_z),
+                sync_goal_marker_to_collectible=bool(args.video_sync_goal_marker_to_collectible),
+                fps=args.video_fps,
+            )
+            video_state["initial_saved"] = True
+            last_video_state["path"] = initial_video_path
+            print(f"initial video saved to {initial_video_path}")
+            if wandb is not None:
+                try:
+                    wandb.log(
+                        {
+                            "episode_video": wandb.Video(
+                                str(initial_video_path),
+                                format="mp4",
+                            ),
+                            "num_steps": step,
+                        },
+                        step=step,
+                    )
+                except Exception as exc:
+                    print(f"wandb initial video log failed at step={step}: {exc}")
+
+        if args.capture_report and not bool(report_state["initial_saved"]):
+            from puppersimMJX.rollout_report import save_rollout_report
+
+            initial_report_path = (
+                Path(args.report_dirname)
+                / run_name
+                / f"{save_prefix}_initial.png"
+            )
+            save_rollout_report(
+                env=eval_env,
+                make_policy_builder=_make_policy,
+                params=params,
+                seed=int(report_seed_rng.integers(0, 2**31 - 1)),
+                output_path=initial_report_path,
+                num_steps=int(args.report_steps),
+                num_stages=int(args.report_num_stages),
+                front_camera_name=(args.report_front_camera_name or None),
+                topdown_camera_name=(args.report_topdown_camera_name or None),
+                map_margin=float(args.report_map_margin),
+                num_rollouts=int(args.report_num_rollouts),
+                rollout_seed_stride=int(args.report_seed_stride),
+            )
+            report_state["initial_saved"] = True
+            last_report_state["path"] = initial_report_path
+            print(f"initial report saved to {initial_report_path}")
+            if wandb is not None:
+                try:
+                    wandb.log(
+                        {
+                            "episode_report": wandb.Image(str(initial_report_path)),
+                            "num_steps": step,
+                        },
+                        step=step,
+                    )
+                except Exception as exc:
+                    print(f"wandb initial report log failed at step={step}: {exc}")
+
         if args.save_checkpoints and step >= checkpoint_state["next_step"]:
             checkpoint_path = checkpoint_dir / f"{save_prefix}_step_{step:012d}{params_ext}"
             fmt = _save_params(checkpoint_path, params)
@@ -874,7 +1358,7 @@ if __name__ == "__main__":
                 env=eval_env,
                 make_policy_builder=_make_policy,
                 params=params,
-                seed=args.seed + 9000 + (step // max(1, int(args.video_eval_interval))),
+                seed=int(video_seed_rng.integers(0, 2**31 - 1)),
                 output_path=video_output_path,
                 num_steps=args.video_steps,
                 width=args.video_width,
@@ -910,12 +1394,57 @@ if __name__ == "__main__":
             while video_state["next_step"] <= step:
                 video_state["next_step"] += max(1, int(args.video_eval_interval))
 
+        if (
+            args.capture_report_during_training
+            and step >= report_state["next_step"]
+        ):
+            from puppersimMJX.rollout_report import save_rollout_report
+
+            report_output_path = (
+                Path(args.report_dirname)
+                / run_name
+                / f"{save_prefix}_step_{step:012d}.png"
+            )
+            save_rollout_report(
+                env=eval_env,
+                make_policy_builder=_make_policy,
+                params=params,
+                seed=int(report_seed_rng.integers(0, 2**31 - 1)),
+                output_path=report_output_path,
+                num_steps=int(args.report_steps),
+                num_stages=int(args.report_num_stages),
+                front_camera_name=(args.report_front_camera_name or None),
+                topdown_camera_name=(args.report_topdown_camera_name or None),
+                map_margin=float(args.report_map_margin),
+                num_rollouts=int(args.report_num_rollouts),
+                rollout_seed_stride=int(args.report_seed_stride),
+            )
+            last_report_state["path"] = report_output_path
+            print(f"training report saved to {report_output_path}")
+            if wandb is not None:
+                try:
+                    wandb.log(
+                        {
+                            "episode_report": wandb.Image(str(report_output_path)),
+                            "num_steps": step,
+                        },
+                        step=step,
+                    )
+                except Exception as exc:
+                    print(f"wandb report log failed at step={step}: {exc}")
+            while report_state["next_step"] <= step:
+                report_state["next_step"] += max(1, int(args.report_eval_interval))
+
     eval_interval = max(1, int(args.eval_interval))
     computed_num_evals = max(1, int(args.num_timesteps) // eval_interval + 1)
-    learning_rate_value = _resolve_learning_rate(
+    learning_rate_config = _resolve_learning_rate(
         schedule_name=args.learning_rate_schedule,
         base_learning_rate=args.learning_rate,
+        final_learning_rate=args.learning_rate_final,
+        anneal_steps=args.learning_rate_anneal_steps,
         total_timesteps=args.num_timesteps,
+        adaptive_kl_min_lr=args.learning_rate_schedule_min_lr,
+        adaptive_kl_max_lr=args.learning_rate_schedule_max_lr,
     )
     train_kwargs = {
         "num_timesteps": args.num_timesteps,
@@ -928,7 +1457,10 @@ if __name__ == "__main__":
         "num_minibatches": args.num_minibatches,
         "num_updates_per_batch": args.num_updates_per_batch,
         "discounting": args.discounting,
-        "learning_rate": learning_rate_value,
+        "learning_rate": learning_rate_config["learning_rate"],
+        "learning_rate_schedule": learning_rate_config["learning_rate_schedule"],
+        "learning_rate_schedule_min_lr": learning_rate_config["learning_rate_schedule_min_lr"],
+        "learning_rate_schedule_max_lr": learning_rate_config["learning_rate_schedule_max_lr"],
         "entropy_cost": args.entropy_cost,
         "num_envs": args.num_envs,
         "batch_size": args.batch_size,
@@ -938,6 +1470,13 @@ if __name__ == "__main__":
         "progress_fn": progress_fn,
         "policy_params_fn": policy_params_fn,
     }
+    train_kwargs["log_training_metrics"] = bool(args.log_training_metrics)
+    if int(args.training_metrics_steps) > 0:
+        train_kwargs["training_metrics_steps"] = int(args.training_metrics_steps)
+    elif bool(args.log_training_metrics):
+        train_kwargs["training_metrics_steps"] = int(args.eval_interval)
+    if wrap_env_fn is not None:
+        train_kwargs["wrap_env_fn"] = wrap_env_fn
 
     randomization_module = str(args.randomization_module or profile.get("randomization_module", "")).strip()
     randomization_fn_name = str(args.randomization_fn or profile.get("randomization_fn", "")).strip()
@@ -996,7 +1535,7 @@ if __name__ == "__main__":
             env=eval_env,
             make_inference_fn=make_inference_fn,
             params=params,
-            seed=args.seed + 12345,
+            seed=int(video_seed_rng.integers(0, 2**31 - 1)),
             output_path=video_output_path,
             num_steps=args.video_steps,
             width=args.video_width,
@@ -1048,6 +1587,20 @@ if __name__ == "__main__":
             log_state["max_step"] = max(log_state["max_step"], last_video_step)
         except Exception as exc:
             print(f"wandb last video log failed: {exc}")
+
+    if wandb is not None and last_report_state["path"] is not None:
+        try:
+            last_report_step = max(log_state["max_step"] + 1, int(args.num_timesteps))
+            wandb.log(
+                {
+                    "episode_report": wandb.Image(str(last_report_state["path"])),
+                    "num_steps": int(args.num_timesteps),
+                },
+                step=last_report_step,
+            )
+            log_state["max_step"] = max(log_state["max_step"], last_report_step)
+        except Exception as exc:
+            print(f"wandb last report log failed: {exc}")
 
     writer.close()
     if wandb is not None:

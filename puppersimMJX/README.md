@@ -44,6 +44,59 @@ python puppersimMJX/pupper_train_ppo_brax.py \
 ```
 For command locomotion, ideally train for at least `500M+` steps for stronger tracking stability.
 
+### AprilTag Walls (camera high-level policy)
+First generate OpenCV-detectable AprilTag textures and the room XML:
+```bash
+python puppersimMJX/create_apriltag_room_assets.py
+```
+For easier visual learning, you can generate a larger single-tag room:
+```bash
+python puppersimMJX/create_apriltag_room_assets.py \
+  --tag-half 0.30 \
+  --no-include-bad-tag
+```
+
+Then train:
+```bash
+python puppersimMJX/pupper_train_ppo_brax.py \
+  --env-name pupper_v2 \
+  --backend mjx \
+  --profile puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_hl.json \
+  --num-timesteps 50000000
+```
+This profile is configured to:
+* use camera-based high-level observations (`high_level_obs_mode=camera`)
+* for non-privileged camera-like features, use `high_level_obs_mode=camera_nopriv` (adds perspective `apparent_tag_scale`, no direct distance-to-tag term in observation)
+* use the pretrained low-level locomotion bundle
+* update high-level commands at `4 Hz` (`high_level_policy_hz=4.0`)
+* quantize camera UV features (`camera_obs_uv_bins`) for lower-fidelity camera features
+
+### MJX True-Pixel PPO (single env, non-vectorized)
+If you want true rendered camera pixels (CNN policy) in MJX without the Brax
+vectorized PPO trainer:
+```bash
+python puppersimMJX/pupper_train_ppo_pixels_mjx.py \
+  --profile puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_hl.json \
+  --total-timesteps 3000000 \
+  --rollout-steps 512 \
+  --policy-action-repeat 2 \
+  --image-width 84 \
+  --image-height 84 \
+  --frame-stack 4 \
+  --obs-frame-skip 2 \
+  --camera-name front_cam \
+  --grayscale
+```
+Notes:
+* This uses a custom single-env PPO loop (not `brax.training.agents.ppo.train`).
+* Keep `use_low_level_policy=true` in the profile to reuse the pretrained locomotion bundle.
+* `--obs-frame-skip k` renders a new camera frame every `k` env steps (reuses last frame otherwise) to improve SPS.
+* `--policy-action-repeat k` calls the policy every `k` env steps and holds action in-between.
+* Video options:
+  * `--capture-video` saves a final MP4.
+  * `--capture-video-during-training --video-interval 500000` saves periodic MP4s.
+  * `--video-steps`, `--video-dirname`, `--video-fps` control rollout length/output/fps.
+
 ### Training profiles
 The trainer supports modular profiles so reward/task setups can be switched without changing code:
 ```bash
@@ -61,6 +114,11 @@ Available starter profiles:
 * `puppersimMJX/tasks/navigation/config/training_profiles/sparse_navigation.json`
 * `puppersimMJX/tasks/navigation/config/training_profiles/sparse_navigation_nav_controller.json`
 * `puppersimMJX/tasks/navigation/config/training_profiles/sparse_collect_spheres.json`
+* `puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_hl.json`
+* `puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_nopriv_hl.json`
+* `puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_nopriv_hl_level4_mult-room_sparse.json`
+* `puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_hl_easy_single_tag.json`
+* `puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_state_hl.json`
 
 Notes:
 * A profile can define `env_kwargs` and optional randomization defaults.

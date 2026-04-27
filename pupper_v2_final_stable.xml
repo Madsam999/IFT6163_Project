@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <mujoco model="pupper_v2_dji">
-  <compiler angle="radian" meshdir="/home/emiliano/experiments/robots/IFT6163_Project/puppersim/data/meshes/" autolimits="true" />
+  <compiler angle="radian" meshdir="puppersim/data/meshes/" autolimits="true" />
   <asset>
     <mesh name="Cube.003" content_type="model/obj" file="Cube.003.obj" />
     <texture name="grid" type="2d" builtin="checker" width="512" height="512" rgb1=".2 .4 .6" rgb2=".4 .6 .8" />

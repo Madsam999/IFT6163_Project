@@ -1,6 +1,5 @@
 build
 dist
-data
 *.egg-info
 __pycache__
 runs/
