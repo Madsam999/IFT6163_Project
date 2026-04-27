@@ -11,7 +11,7 @@ from typing import Any, Dict, Tuple
 
 import numpy as np
 
-import puppersim.data as pd
+from puppersimMJX import get_assets_path
 from puppersim import pupper_constants
 
 
@@ -19,48 +19,26 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _REPO_ROOT not in os.sys.path:
     os.sys.path.insert(0, _REPO_ROOT)
 
+_REWARD_MODULES = {
+    "command_locomotion": "puppersimMJX.tasks.cc_locomotion.reward",
+    "sparse_navigation": "puppersimMJX.tasks.navigation.reward_sparse",
+    "apriltag_walls": "puppersimMJX.tasks.apriltag_walls.reward",
+    "simple_forward": "puppersimMJX.tasks.simple_forward.reward",
+}
+
 
 def _default_urdf_path() -> Path:
-    return Path(pd.getDataPath()) / "pupper_v2a.urdf"
+    return get_assets_path() / "pupper_v2a.urdf"
 
 
 def _default_mjcf_path() -> Path:
-    return Path(pd.getDataPath()) / "pupper_v2a_mjx.xml"
+    return get_assets_path() / "pupper_v2_final_stable.xml"
 
 
 def _ensure_mjcf(
     model_path: str | os.PathLike[str] | None,
-    urdf_path: str | os.PathLike[str] | None,
-    auto_generate_mjcf: bool,
-    regenerate_mjcf_if_exists: bool,
-    kp: float,
-    kd: float,
-    timestep: float,
-    mjx_compatible: bool,
-    mjx_iterations: int,
-    mjx_ls_iterations: int,
-    mjx_impratio: float,
-    floating_base: bool,
-    spawn_z: float,
-    add_tracking_camera: bool,
-    collision_mode: str,
 ) -> Path:
     resolved_model_path = Path(model_path).expanduser().resolve() if model_path else _default_mjcf_path()
-    _ = Path(urdf_path).expanduser().resolve() if urdf_path else _default_urdf_path()
-    _ = auto_generate_mjcf
-    _ = regenerate_mjcf_if_exists
-    _ = kp
-    _ = kd
-    _ = timestep
-    _ = mjx_compatible
-    _ = mjx_iterations
-    _ = mjx_ls_iterations
-    _ = mjx_impratio
-    _ = floating_base
-    _ = spawn_z
-    _ = add_tracking_camera
-    _ = collision_mode
-
     if resolved_model_path.exists():
         return resolved_model_path
 
@@ -89,6 +67,65 @@ def _import_attr(module_name: str, attr_name: str) -> Any:
         raise ValueError(f"Module '{module_name}' has no attribute '{attr_name}'.") from exc
 
 
+def _resolve_reward_module(reward_mode: str, reward_module: str) -> str:
+    if reward_module:
+        return reward_module
+    try:
+        return _REWARD_MODULES[reward_mode]
+    except KeyError as exc:
+        modes = "/".join(sorted(_REWARD_MODULES))
+        raise ValueError(
+            f"Unknown reward_mode '{reward_mode}'. Set reward_mode to {modes} or provide reward_module."
+        ) from exc
+
+
+def _default_reward_config(
+    reward_mode: str,
+    reward_module_explicit: bool,
+    command_reward_cfg: Dict[str, Any],
+    simple_forward_cfg: Dict[str, Any],
+    goal_reach_tolerance: float,
+) -> Dict[str, Any]:
+    if reward_module_explicit:
+        return {}
+    if reward_mode == "command_locomotion":
+        return command_reward_cfg
+    if reward_mode == "simple_forward":
+        return simple_forward_cfg
+    if reward_mode == "sparse_navigation":
+        return {
+            "goal_tolerance": goal_reach_tolerance,
+            "goal_reached_bonus": 10.0,
+            "step_penalty": -0.01,
+            "collision_penalty": -5.0,
+        }
+    if reward_mode == "apriltag_walls":
+        return {
+            "visible_reward": 1.0,
+            "alignment_weight": 0.6,
+            "centering_weight": 0.8,
+            "distance_weight": 0.15,
+            "bad_visible_penalty": 1.2,
+            "bad_alignment_penalty": 0.5,
+            "bad_centering_penalty": 0.7,
+            "bad_distance_penalty": 0.2,
+            "contrastive_distance_weight": 0.2,
+            "action_penalty_weight": 0.01,
+        }
+    return {}
+
+
+def _link_indices(sys: Any, names: Tuple[str, ...], limit: int | None = None) -> Tuple[int, ...]:
+    link_names = list(getattr(sys, "link_names", ()))
+    indices = []
+    for name in names:
+        try:
+            indices.append(int(link_names.index(name)))
+        except ValueError:
+            continue
+    return tuple(indices[:limit] if limit is not None else indices)
+
+
 def _motor_init_angles_urdf_convention() -> np.ndarray:
     names = list(pupper_constants.JOINT_NAMES)
     sdk_angles = np.array([pupper_constants.INIT_JOINT_ANGLES[name] for name in names], dtype=np.float64)
@@ -103,10 +140,6 @@ def _init_orientation_wxyz() -> np.ndarray:
     if ori_xyzw.shape[0] != 4:
         return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
     return np.array([ori_xyzw[3], ori_xyzw[0], ori_xyzw[1], ori_xyzw[2]], dtype=np.float64)
-
-
-class PupperV2BraxEnv:
-    pass
 
 
 _APRILTAG_LEVEL4_GRID: Tuple[str, ...] = (
@@ -383,23 +416,26 @@ def _build_env_class():
             backend: str = "mjx",
             **kwargs,
         ):
-            mjcf_path = _ensure_mjcf(
-                model_path=model_path,
-                urdf_path=urdf_path,
-                auto_generate_mjcf=auto_generate_mjcf,
-                regenerate_mjcf_if_exists=regenerate_mjcf_if_exists,
-                kp=conversion_kp,
-                kd=conversion_kd,
-                timestep=conversion_timestep,
-                mjx_compatible=conversion_mjx_compatible,
-                mjx_iterations=conversion_mjx_iterations,
-                mjx_ls_iterations=conversion_mjx_ls_iterations,
-                mjx_impratio=conversion_mjx_impratio,
-                floating_base=conversion_floating_base,
-                spawn_z=conversion_spawn_z,
-                add_tracking_camera=conversion_add_tracking_camera,
-                collision_mode=conversion_collision_mode,
+            # These conversion options are still accepted by the constructor so
+            # older config JSON files load unchanged. MJX XML generation is now
+            # an explicit preprocessing step; the env only verifies the XML path.
+            _ = (
+                urdf_path,
+                auto_generate_mjcf,
+                regenerate_mjcf_if_exists,
+                conversion_kp,
+                conversion_kd,
+                conversion_timestep,
+                conversion_mjx_compatible,
+                conversion_mjx_iterations,
+                conversion_mjx_ls_iterations,
+                conversion_mjx_impratio,
+                conversion_floating_base,
+                conversion_spawn_z,
+                conversion_add_tracking_camera,
+                conversion_collision_mode,
             )
+            mjcf_path = _ensure_mjcf(model_path=model_path)
             self._model_path = str(mjcf_path)
 
             sys = mjcf.load(str(mjcf_path))
@@ -576,50 +612,16 @@ def _build_env_class():
                 },
             }
 
-            if not self._reward_module:
-                if self._reward_mode == "command_locomotion":
-                    self._reward_module = "puppersimMJX.tasks.cc_locomotion.reward"
-                elif self._reward_mode == "sparse_navigation":
-                    self._reward_module = "puppersimMJX.tasks.navigation.reward_sparse"
-                elif self._reward_mode == "apriltag_walls":
-                    self._reward_module = "puppersimMJX.tasks.apriltag_walls.reward"
-                elif self._reward_mode == "simple_forward":
-                    self._reward_module = "puppersimMJX.tasks.simple_forward.reward"
-                else:
-                    raise ValueError(
-                        "Unknown reward_mode. Set reward_mode to simple_forward/command_locomotion/sparse_navigation/apriltag_walls "
-                        "or provide reward_module."
-                    )
+            self._reward_module = _resolve_reward_module(self._reward_mode, self._reward_module)
 
             if reward_config is None:
-                if reward_module_explicit:
-                    reward_config = {}
-                elif self._reward_mode == "command_locomotion":
-                    reward_config = command_reward_cfg
-                elif self._reward_mode == "simple_forward":
-                    reward_config = simple_forward_cfg
-                elif self._reward_mode == "sparse_navigation":
-                    reward_config = {
-                        "goal_tolerance": self._goal_reach_tolerance,
-                        "goal_reached_bonus": 10.0,
-                        "step_penalty": -0.01,
-                        "collision_penalty": -5.0,
-                    }
-                elif self._reward_mode == "apriltag_walls":
-                    reward_config = {
-                        "visible_reward": 1.0,
-                        "alignment_weight": 0.6,
-                        "centering_weight": 0.8,
-                        "distance_weight": 0.15,
-                        "bad_visible_penalty": 1.2,
-                        "bad_alignment_penalty": 0.5,
-                        "bad_centering_penalty": 0.7,
-                        "bad_distance_penalty": 0.2,
-                        "contrastive_distance_weight": 0.2,
-                        "action_penalty_weight": 0.01,
-                    }
-                else:
-                    reward_config = {}
+                reward_config = _default_reward_config(
+                    reward_mode=self._reward_mode,
+                    reward_module_explicit=reward_module_explicit,
+                    command_reward_cfg=command_reward_cfg,
+                    simple_forward_cfg=simple_forward_cfg,
+                    goal_reach_tolerance=self._goal_reach_tolerance,
+                )
             if not isinstance(reward_config, dict):
                 raise ValueError("reward_config must be a dict when provided.")
 
@@ -663,21 +665,16 @@ def _build_env_class():
             except Exception:
                 self._torso_idx = 0
 
-            self._foot_body_indices = []
-            for name in ("leftFrontLowerLeg", "leftRearLowerLeg", "rightFrontLowerLeg", "rightRearLowerLeg"):
-                try:
-                    self._foot_body_indices.append(int(self.sys.link_names.index(name)))
-                except Exception:
-                    pass
-            self._foot_body_indices = tuple(self._foot_body_indices[:4])
-
-            self._knee_body_indices = []
-            for name in ("leftFrontUpperLeg", "leftRearUpperLeg", "rightFrontUpperLeg", "rightRearUpperLeg"):
-                try:
-                    self._knee_body_indices.append(int(self.sys.link_names.index(name)))
-                except Exception:
-                    pass
-            self._knee_body_indices = tuple(self._knee_body_indices[:4])
+            self._foot_body_indices = _link_indices(
+                self.sys,
+                ("leftFrontLowerLeg", "leftRearLowerLeg", "rightFrontLowerLeg", "rightRearLowerLeg"),
+                limit=4,
+            )
+            self._knee_body_indices = _link_indices(
+                self.sys,
+                ("leftFrontUpperLeg", "leftRearUpperLeg", "rightFrontUpperLeg", "rightRearUpperLeg"),
+                limit=4,
+            )
 
             low = np.asarray(pupper_constants.MOTOR_ACTION_LOWER_LIMIT, dtype=np.float32)
             high = np.asarray(pupper_constants.MOTOR_ACTION_UPPER_LIMIT, dtype=np.float32)

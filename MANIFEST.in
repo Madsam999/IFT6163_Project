@@ -1,2 +1,3 @@
 include MANIFEST.in *.txt
 recursive-include puppersim *.*
+recursive-include puppersimMJX *.*

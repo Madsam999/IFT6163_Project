@@ -1,6 +1,6 @@
 {
-  "model_path": "puppersim/data/pupper_v2a.fixed.xml",
-  "urdf_path": "puppersim/data/pupper_v2a.urdf",
+  "model_path": "puppersimMJX/assets/pupper_v2a.fixed.xml",
+  "urdf_path": "puppersimMJX/assets/pupper_v2a.urdf",
   "auto_generate_mjcf": true,
   "regenerate_mjcf_if_exists": false,
   "conversion_kp": 30.0,

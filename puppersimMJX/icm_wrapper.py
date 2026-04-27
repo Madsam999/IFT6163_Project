@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""Intrinsic Curiosity Module wrapper for Brax/MJX environments.
+
+The wrapper augments the environment reward with an intrinsic reward based on
+forward-model prediction error. If the ICM model cannot predict the next
+observation features well, the transition is treated as novel and receives an
+extra exploration bonus during PPO training.
+"""
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,11 +34,15 @@ class ICMConfig:
 
 
 class _ICMNet(nn.Module):
+    """Small encoder + inverse/forward dynamics model used for curiosity."""
+
     feature_dim: int
     hidden_dim: int
 
     @nn.compact
     def __call__(self, obs: jax.Array, next_obs: jax.Array, action: jax.Array):
+        # Encode observations into a compact feature space. The forward model
+        # predicts in this feature space rather than raw observations.
         def encode(x):
             x = nn.elu(nn.Dense(self.hidden_dim)(x))
             return nn.elu(nn.Dense(self.feature_dim)(x))
@@ -38,11 +50,15 @@ class _ICMNet(nn.Module):
         phi = encode(obs)
         phi_next = encode(next_obs)
 
+        # Inverse model: infer the action that connected obs -> next_obs.
+        # This encourages the learned features to keep action-relevant details.
         inv_in = jnp.concatenate([phi, phi_next], axis=-1)
         action_hat = nn.Dense(self.hidden_dim)(inv_in)
         action_hat = nn.elu(action_hat)
         action_hat = nn.Dense(action.shape[-1])(action_hat)
 
+        # Forward model: predict next features from current features + action.
+        # Its prediction error becomes the intrinsic curiosity reward.
         fwd_in = jnp.concatenate([phi, action], axis=-1)
         phi_next_hat = nn.Dense(self.hidden_dim)(fwd_in)
         phi_next_hat = nn.elu(phi_next_hat)
@@ -51,6 +67,8 @@ class _ICMNet(nn.Module):
 
 
 def _flatten_obs(obs: Any, batch_size: int) -> jax.Array:
+    """Convert possibly nested Brax observations into a 2D batch matrix."""
+
     leaves = jax.tree_util.tree_leaves(obs)
     if not leaves:
         raise ValueError("ICM received empty observation tree.")
@@ -70,6 +88,8 @@ def _flatten_obs(obs: Any, batch_size: int) -> jax.Array:
 
 
 def _flatten_action(action: jax.Array, batch_size: int) -> jax.Array:
+    """Convert actions to shape (batch_size, action_dim)."""
+
     action = jnp.asarray(action)
     if action.ndim == 1:
         action = jnp.reshape(action, (1, -1))
@@ -81,6 +101,8 @@ def _flatten_action(action: jax.Array, batch_size: int) -> jax.Array:
 
 
 def _to_batch_scalar(x: jax.Array, batch_size: int) -> jax.Array:
+    """Normalize scalar/vector env fields such as done into batch vectors."""
+
     x = jnp.asarray(x)
     if x.ndim == 0:
         return jnp.full((batch_size,), x)
@@ -88,11 +110,15 @@ def _to_batch_scalar(x: jax.Array, batch_size: int) -> jax.Array:
 
 
 def _batch_size_from_reward(reward: jax.Array) -> int:
+    """Infer vectorized env batch size from the reward array."""
+
     reward_arr = jnp.asarray(reward)
     return int(reward_arr.shape[0]) if reward_arr.ndim > 0 else 1
 
 
 def _add_batch_axis(tree: Any, batch_size: int):
+    """Replicate an unbatched parameter/optimizer tree per vectorized env."""
+
     return jax.tree_util.tree_map(
         lambda x: jnp.broadcast_to(jnp.asarray(x), (batch_size,) + jnp.asarray(x).shape),
         tree,
@@ -110,6 +136,8 @@ class ICMWrapper(base.Wrapper):
         self._opt = optax.adam(float(config.learning_rate))
 
     def _reward_weight(self, env_steps: jax.Array) -> jax.Array:
+        """Return the current intrinsic-reward weight, optionally annealed."""
+
         start = float(self._cfg.reward_weight)
         end = float(self._cfg.reward_weight_final)
         if int(self._cfg.anneal_steps) <= 0:
@@ -130,10 +158,14 @@ class ICMWrapper(base.Wrapper):
         return jnp.array(start + (end - start) * progress, dtype=jnp.float32)
 
     def _init_icm_state(self, state: base.State) -> dict[str, Any]:
+        """Initialize per-env ICM parameters and optimizer state at reset."""
+
         batch_size = _batch_size_from_reward(state.reward)
         obs = _flatten_obs(state.obs, batch_size=batch_size)
         action = jnp.zeros((batch_size, int(self.action_size)), dtype=obs.dtype)
 
+        # Initialize one base model, then replicate it so each vectorized env
+        # has independent ICM parameters and optimizer state.
         init_key = jax.random.PRNGKey(self._seed)
         base_params = self._net.init(init_key, obs[:1], obs[:1], action[:1])["params"]
         base_opt_state = self._opt.init(base_params)
@@ -151,8 +183,13 @@ class ICMWrapper(base.Wrapper):
         if not bool(self._cfg.enabled):
             return state
 
+        # Store ICM state in Brax's state.info so it travels through jit/vmap
+        # with the environment state.
         info = dict(state.info)
         info.update(self._init_icm_state(state))
+
+        # Expose zero-valued metrics immediately so training logs have stable
+        # keys before the first environment step.
         metrics = dict(state.metrics)
         reward_shape = jnp.asarray(state.reward).shape
         zeros = jnp.zeros(reward_shape, dtype=jnp.float32)
@@ -168,15 +205,21 @@ class ICMWrapper(base.Wrapper):
         return state.replace(info=info, metrics=metrics)
 
     def step(self, state: base.State, action: jax.Array) -> base.State:
+        # Step the wrapped task first; ICM uses the actual transition
+        # (state.obs, action, next_state.obs) produced by the environment.
         next_state = self.env.step(state, action)
         if not bool(self._cfg.enabled):
             return next_state
 
+        # Retrieve the online ICM parameters and optimizer state saved on the
+        # previous reset/step.
         info = dict(state.info)
         params = info["icm_params"]
         opt_state = info["icm_opt_state"]
         env_steps = info["icm_env_steps"]
 
+        # Flatten Brax observations/actions into matrices that the ICM MLP can
+        # consume. Terminal transitions are masked out of loss and reward.
         batch_size = _batch_size_from_reward(next_state.reward)
         obs = _flatten_obs(state.obs, batch_size=batch_size)
         next_obs = _flatten_obs(next_state.obs, batch_size=batch_size)
@@ -185,21 +228,30 @@ class ICMWrapper(base.Wrapper):
         mask = 1.0 - done
 
         def loss_fn(model_params, obs_i, next_obs_i, action_i, mask_i):
+            # Compute one-env ICM losses. vmap below applies this over all
+            # vectorized environments independently.
             phi_next, phi_next_hat, action_hat = self._net.apply(
                 {"params": model_params},
                 obs_i[jnp.newaxis, :],
                 next_obs_i[jnp.newaxis, :],
                 action_i[jnp.newaxis, :],
             )
+            # Stop gradients through the target next features so the forward
+            # model learns to predict the encoder output instead of moving the
+            # target to reduce loss.
             forward_err = 0.5 * jnp.sum(
                 jnp.square(phi_next_hat[0] - jax.lax.stop_gradient(phi_next[0])), axis=-1
             )
             inverse_err = 0.5 * jnp.sum(jnp.square(action_hat[0] - action_i), axis=-1)
             forward_loss = forward_err * mask_i
             inverse_loss = inverse_err * mask_i
+            # beta controls how much the optimizer emphasizes forward vs
+            # inverse prediction while training the curiosity model.
             total = (1.0 - float(self._cfg.beta)) * inverse_loss + float(self._cfg.beta) * forward_loss
             return total, (forward_err, forward_loss, inverse_loss)
 
+        # Different vectorized envs maintain separate ICM models, so compute
+        # losses/gradients per env rather than over one shared batch model.
         per_env_value_and_grad = jax.vmap(jax.value_and_grad(loss_fn, has_aux=True))
         (icm_loss, (forward_err, forward_loss, inverse_loss)), grads = per_env_value_and_grad(
             params, obs, next_obs, action_flat, mask
@@ -211,6 +263,8 @@ class ICMWrapper(base.Wrapper):
         updates, new_opt_state = jax.vmap(_update_step)(grads, opt_state, params)
         new_params = jax.vmap(optax.apply_updates)(params, updates)
 
+        # Curiosity bonus is the forward-model prediction error: unfamiliar or
+        # hard-to-predict transitions receive larger intrinsic reward.
         intrinsic_reward = float(self._cfg.eta) * forward_err
         if float(self._cfg.reward_clip) > 0:
             intrinsic_reward = jnp.clip(intrinsic_reward, 0.0, float(self._cfg.reward_clip))
@@ -221,6 +275,7 @@ class ICMWrapper(base.Wrapper):
         reward_weight = self._reward_weight(jnp.mean(env_steps) * float(batch_size))
         shaped_reward = jnp.asarray(next_state.reward) + reward_weight * intrinsic_reward
 
+        # Save updated ICM state into next_state.info for the next transition.
         new_env_steps = env_steps + jnp.ones_like(env_steps)
 
         new_info = dict(next_state.info)
@@ -234,6 +289,7 @@ class ICMWrapper(base.Wrapper):
 
         metrics = dict(next_state.metrics)
         weight_vec = jnp.ones_like(intrinsic_reward) * reward_weight
+        # Metrics are logged by the PPO trainer for debugging/ablation plots.
         metrics.update(
             {
                 "icm_reward": intrinsic_reward,

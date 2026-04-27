@@ -1,6 +1,6 @@
 {
-  "model_path": "puppersim/data/pupper_v2_apriltag_room_smalltag_level1.xml",
-  "urdf_path": "puppersim/data/pupper_v2a.urdf",
+  "model_path": "puppersimMJX/assets/pupper_v2_apriltag_room_smalltag_level1.xml",
+  "urdf_path": "puppersimMJX/assets/pupper_v2a.urdf",
   "auto_generate_mjcf": false,
   "regenerate_mjcf_if_exists": false,
   "action_scale": 0.75,

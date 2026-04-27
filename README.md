@@ -130,16 +130,16 @@ python puppersimMJX/pupper_train_ppo_brax.py --env-name pupper_v2 --backend mjx
 Requires Python 3.10+ (MJX is not supported on Python 3.7).
 
 The trainer uses local Pupper v2 assets from this repo only.
-It auto-generates `puppersim/data/pupper_v2a_mjx.xml` from
-`puppersim/data/pupper_v2a.urdf` if the MJCF file is missing.
+The MJX XML/URDF assets live under `puppersimMJX/assets`.
 
 If you want to generate/update the MJCF manually:
 ```bash
-python puppersim/pupper_v2_urdf_to_mjcf.py \
-  --urdf-path puppersim/data/pupper_v2a.urdf \
-  --output-path puppersim/data/pupper_v2a_mjx.xml
+python puppersimMJX/xml_generation/create_mujoco_xml.py \
+  --input puppersimMJX/assets/pupper_v2a.fixed.xml \
+  --output puppersimMJX/assets/pupper_v2_final_stable.xml \
+  --force
 ```
-`pupper_v2_urdf_to_mjcf.py` applies MJX-compatible geometry/contact settings by default.
+`create_mujoco_xml.py` applies MJX-compatible geometry/contact settings by default.
 
 ### Troubleshooting
 <details>

@@ -34,7 +34,16 @@ setup(
     license="Apache 2.0",
     packages=find_packages(),
     include_package_data=True,
-    package_data={'data': ["upper_leg_left_rear.obj"]},
+    package_data={
+        "data": ["upper_leg_left_rear.obj"],
+        "puppersimMJX": [
+            "assets/*.urdf",
+            "assets/*.xml",
+            "assets/meshes/*",
+            "assets/meshes/textures/*",
+            "assets/textures/*",
+        ],
+    },
     install_requires=[
         "attrs",
         "gymnasium",

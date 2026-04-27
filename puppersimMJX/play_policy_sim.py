@@ -30,6 +30,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from puppersim import pupper_constants
+from puppersimMJX import get_assets_path
 from puppersimMJX.helper.pupper_brax_policy_bundle import BraxPolicyBundle
 
 _APRILTAG_LEVEL4_GRID = (
@@ -108,9 +109,9 @@ def _resolve_xml_path(
     if p.exists():
         return p
     for candidate in (
-        Path(_REPO_ROOT) / "puppersim/data/pupper_v2_apriltag_room.xml",
-        Path(_REPO_ROOT) / "puppersim/data/pupper_v2_final_stable_cam.xml",
-        Path(_REPO_ROOT) / "puppersim/data/pupper_v2_final_stable.xml",
+        get_assets_path() / "pupper_v2_apriltag_room.xml",
+        get_assets_path() / "pupper_v2_final_stable_cam.xml",
+        get_assets_path() / "pupper_v2_final_stable.xml",
     ):
         if candidate.exists():
             return candidate.resolve()
@@ -742,7 +743,7 @@ def _forward_clearance_from_rects(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--xml-path", type=Path, default=Path("puppersim/data/pupper_v2_final_stable_cam_goal.xml"))
+    parser.add_argument("--xml-path", type=Path, default=get_assets_path() / "pupper_v2_final_stable_cam.xml")
     parser.add_argument("--camera-name", type=str, default="front_cam")
     parser.add_argument("--show-camera-features", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--simend", type=float, default=0.0, help="<=0 means run until window close")

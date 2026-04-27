@@ -1,8 +1,8 @@
 """Create stable MJX XML from fixed URDF-converted XML.
 
 This script is intentionally deterministic for the Pupper v2 workflow:
-  input  : `puppersim/data/pupper_v2a.fixed.xml`
-  output : `puppersim/data/pupper_v2_final_stable.xml`
+  input  : `puppersimMJX/assets/pupper_v2a.fixed.xml`
+  output : `puppersimMJX/assets/pupper_v2_final_stable.xml`
 
 Safety:
 - It will NOT overwrite an existing output unless `--force` is provided.
@@ -13,6 +13,8 @@ from __future__ import annotations
 import argparse
 import pathlib
 import xml.etree.ElementTree as ET
+
+from puppersimMJX import get_assets_path
 
 
 MOTOR_JOINT_ORDER = [
@@ -330,13 +332,13 @@ def _parse_args():
     parser.add_argument(
         "--input",
         type=pathlib.Path,
-        default=pathlib.Path("puppersim/data/pupper_v2a.fixed.xml"),
+        default=get_assets_path() / "pupper_v2a.fixed.xml",
         help="Input fixed xml generated from URDF.",
     )
     parser.add_argument(
         "--output",
         type=pathlib.Path,
-        default=pathlib.Path("puppersim/data/pupper_v2_final_stable.xml"),
+        default=get_assets_path() / "pupper_v2_final_stable.xml",
         help="Output stable xml path.",
     )
     parser.add_argument("--spawn-z", type=float, default=0.20, help="Base spawn height in meters.")

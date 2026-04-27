@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <robot name="pupper_v2_dji">
 
-    <mujoco><compiler meshdir="/home/emiliano/experiments/robots/IFT6163_Project/puppersim/data/meshes" discardvisual="false" /></mujoco><link name="leftFrontLeg">
+    <mujoco><compiler meshdir="meshes" discardvisual="false" /></mujoco><link name="leftFrontLeg">
       <inertial>
         <origin xyz="0.0139 0.0254 0" rpy="0 0 0" />
         <mass value="0.106" />

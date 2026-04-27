@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+from puppersimMJX import get_assets_path
 
 DEFAULT_TAG_HALF = 0.20
 
@@ -61,6 +64,10 @@ def _ensure_asset(asset: ET.Element, tag: str, name: str, **attrs: str) -> None:
                 child.set(k, v)
             return
     ET.SubElement(asset, tag, name=name, **attrs)
+
+
+def _relpath(path: Path, start: Path) -> str:
+    return os.path.relpath(path.resolve(), start.resolve())
 
 
 def _remove_existing(worldbody: ET.Element) -> None:
@@ -223,11 +230,12 @@ def _build_xml(
 
 
 def main() -> None:
+    assets_path = get_assets_path()
     p = argparse.ArgumentParser()
-    p.add_argument("--input-xml", type=Path, default=Path("puppersim/data/pupper_v2_final_stable_cam.xml"))
-    p.add_argument("--output-xml", type=Path, default=Path("puppersim/data/pupper_v2_apriltag_room.xml"))
-    p.add_argument("--textures-dir", type=Path, default=Path("puppersim/data/textures"))
-    p.add_argument("--meshes-dir", type=Path, default=Path("puppersim/data/meshes"))
+    p.add_argument("--input-xml", type=Path, default=assets_path / "pupper_v2_final_stable_cam.xml")
+    p.add_argument("--output-xml", type=Path, default=assets_path / "pupper_v2_apriltag_room.xml")
+    p.add_argument("--textures-dir", type=Path, default=assets_path / "textures")
+    p.add_argument("--meshes-dir", type=Path, default=assets_path / "meshes")
     p.add_argument("--good-tag-id", type=int, default=101)
     p.add_argument("--bad-tag-id", type=int, default=287)
     p.add_argument("--tag-half", type=float, default=DEFAULT_TAG_HALF)
@@ -247,8 +255,8 @@ def main() -> None:
     _build_xml(
         input_xml=args.input_xml,
         output_xml=args.output_xml,
-        good_tex=str(good_tex.resolve()),
-        bad_tex=str(bad_tex.resolve()),
+        good_tex=_relpath(good_tex, args.output_xml.parent),
+        bad_tex=_relpath(bad_tex, args.output_xml.parent),
         quad_mesh_obj=quad_mesh.name,
         tag_half=float(args.tag_half),
         include_bad_tag=bool(args.include_bad_tag),

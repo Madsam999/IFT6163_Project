@@ -2,7 +2,7 @@
 """Add or replace a body-mounted camera in an existing stable MuJoCo XML.
 
 Default behavior matches this project request:
-- Reads stable XML: puppersim/data/pupper_v2_final_stable.xml
+- Reads stable XML: puppersimMJX/assets/pupper_v2_final_stable.xml
 - Adds camera on base_link named front_cam
 - Uses provided default pose:
   pos="0.0001 -0.147 -0.0064"
@@ -15,6 +15,8 @@ import argparse
 import pathlib
 import xml.etree.ElementTree as ET
 from typing import Iterable
+
+from puppersimMJX import get_assets_path
 
 
 def _parse_vec3(text: str) -> list[float]:
@@ -123,7 +125,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--xml-path",
         type=pathlib.Path,
-        default=pathlib.Path("puppersim/data/pupper_v2_final_stable.xml"),
+        default=get_assets_path() / "pupper_v2_final_stable.xml",
         help="Input stable XML.",
     )
     p.add_argument(
