@@ -25,6 +25,7 @@ import jax.numpy as jp
 import numpy as np
 import tyro
 from brax.envs.base import Wrapper
+from flax import linen
 from torch.utils.tensorboard import SummaryWriter
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -34,6 +35,10 @@ if _REPO_ROOT not in sys.path:
 _DEFAULT_ENV_KWARGS = "puppersimMJX/tasks/simple_forward/config/pupper_brax_env_kwargs.v3like_stable.json"
 _RENDER_CONTEXT_KEEPALIVE: list[Any] = []
 _VIDEO_RENDERER_KEEPALIVE: list[Any] = []
+_AUX_TAG_VISIBLE_KEY = "aux/tag_visible"
+_AUX_TAG_U_KEY = "aux/tag_u"
+_AUX_TAG_V_KEY = "aux/tag_v"
+_AUX_TAG_SCALE_KEY = "aux/tag_scale"
 
 
 @dataclass
@@ -54,6 +59,10 @@ class Args:
         "avg_reward,"
         "success_rate,"
         "training/kl_mean,"
+        "training/aux_tag_loss,"
+        "training/aux_tag_visible_loss,"
+        "training/aux_tag_regression_loss,"
+        "training/aux_tag_visible_accuracy,"
         "training/sps"
     )
 
@@ -108,6 +117,10 @@ class Args:
     cnn_global_pool: str = "avg"
     normalise_channels: bool = False
     augment_pixels: bool = False
+    aux_tag_prediction: bool = False
+    aux_tag_loss_coef: float = 0.1
+    aux_tag_visible_loss_coef: float = 1.0
+    aux_tag_regression_loss_coef: float = 1.0
 
     capture_video: bool = False
     capture_video_during_training: bool = False
@@ -243,6 +256,10 @@ def _filter_wandb_metrics(metric_floats: Mapping[str, float], args: Args) -> Dic
             "policy_loss",
             "value_loss",
             "entropy_loss",
+            "aux_tag_loss",
+            "aux_tag_visible_loss",
+            "aux_tag_regression_loss",
+            "aux_tag_visible_accuracy",
         }:
             out[key] = value
             continue
@@ -266,6 +283,251 @@ def _filter_wandb_metrics(metric_floats: Mapping[str, float], args: Args) -> Dic
         ):
             out[key] = value
     return out
+
+
+class AuxTagVisionPolicy(linen.Module):
+    """Vision policy with a shared CNN encoder and an AprilTag auxiliary head."""
+
+    output_size: int
+    policy_hidden_layer_sizes: Sequence[int]
+    activation: Callable[[jp.ndarray], jp.ndarray]
+    kernel_init: Callable[..., Any]
+    normalise_channels: bool
+    state_obs_key: str
+    cnn_output_channels: Sequence[int]
+    cnn_kernel_size: Sequence[int]
+    cnn_stride: Sequence[int]
+    cnn_padding: str
+    cnn_activation: Callable[[jp.ndarray], jp.ndarray]
+    cnn_global_pool: str
+    cnn_kernel_init: Callable[..., Any]
+
+    def _encode(self, data: Mapping[str, jp.ndarray]) -> jp.ndarray:
+        from brax.training import networks as brax_networks
+
+        encoder_kwargs = {
+            "layer_sizes": (),
+            "policy_head": False,
+            "normalise_channels": self.normalise_channels,
+            "state_obs_key": "",
+            "cnn_output_channels": tuple(self.cnn_output_channels),
+            "cnn_kernel_size": tuple(self.cnn_kernel_size),
+            "cnn_stride": tuple(self.cnn_stride),
+            "cnn_padding": self.cnn_padding,
+            "cnn_activation": self.cnn_activation,
+            "cnn_global_pool": self.cnn_global_pool,
+            "cnn_kernel_init": self.cnn_kernel_init,
+            "name": "encoder",
+        }
+        encoder = brax_networks.VisionMLP(
+            **_filter_kwargs(brax_networks.VisionMLP, encoder_kwargs)
+        )
+        hidden = encoder(dict(data))
+        if self.state_obs_key:
+            hidden = jp.concatenate([hidden, data[self.state_obs_key]], axis=-1)
+        return hidden
+
+    @linen.compact
+    def __call__(self, data: Mapping[str, jp.ndarray], *, return_aux: bool = False) -> jp.ndarray:
+        from brax.training import networks as brax_networks
+
+        hidden = self._encode(data)
+        aux_hidden = linen.Dense(
+            max(64, int(self.policy_hidden_layer_sizes[0]) if self.policy_hidden_layer_sizes else 64),
+            kernel_init=self.kernel_init,
+            name="aux_hidden",
+        )(hidden)
+        aux_hidden = self.activation(aux_hidden)
+        aux_logits = linen.Dense(4, kernel_init=self.kernel_init, name="aux_tag_head")(aux_hidden)
+        policy_logits = brax_networks.MLP(
+            layer_sizes=tuple(self.policy_hidden_layer_sizes) + (int(self.output_size),),
+            activation=self.activation,
+            kernel_init=self.kernel_init,
+            name="policy_head",
+        )(hidden)
+        return aux_logits if return_aux else policy_logits
+
+
+def _make_aux_tag_ppo_vision_networks(
+    observation_size: Mapping[str, Tuple[int, ...]],
+    action_size: int,
+    preprocess_observations_fn: Callable[..., Any],
+    *,
+    policy_hidden_layer_sizes: Sequence[int] = (256, 256),
+    value_hidden_layer_sizes: Sequence[int] = (256, 256),
+    activation: Callable[[jp.ndarray], jp.ndarray] = jax.nn.swish,
+    normalise_channels: bool = False,
+    policy_obs_key: str = "",
+    value_obs_key: str = "",
+    distribution_type: str = "tanh_normal",
+    noise_std_type: str = "scalar",
+    init_noise_std: float = 1.0,
+    cnn_output_channels: Sequence[int] = (32, 64, 64),
+    cnn_kernel_size: Sequence[int] = (8, 4, 3),
+    cnn_stride: Sequence[int] = (4, 2, 1),
+    cnn_padding: str = "zeros",
+    cnn_global_pool: str = "avg",
+):
+    from brax.training import distribution
+    from brax.training import networks as brax_networks
+    from brax.training.agents.ppo import networks_vision as ppo_networks_vision
+
+    if distribution_type == "normal":
+        parametric_action_distribution = distribution.NormalDistribution(event_size=action_size)
+    elif distribution_type == "tanh_normal":
+        parametric_action_distribution = distribution.NormalTanhDistribution(event_size=action_size)
+    else:
+        raise ValueError("distribution_type must be one of: normal, tanh_normal")
+
+    padding = {"zeros": "SAME", "valid": "VALID"}.get(str(cnn_padding).lower(), str(cnn_padding))
+    cnn_activation = linen.relu
+    kernel_init = jax.nn.initializers.lecun_uniform()
+    cnn_kernel_init = jax.nn.initializers.lecun_normal()
+
+    module = AuxTagVisionPolicy(
+        output_size=parametric_action_distribution.param_size,
+        policy_hidden_layer_sizes=tuple(policy_hidden_layer_sizes),
+        activation=activation,
+        kernel_init=kernel_init,
+        normalise_channels=bool(normalise_channels),
+        state_obs_key=str(policy_obs_key or ""),
+        cnn_output_channels=tuple(cnn_output_channels),
+        cnn_kernel_size=tuple(cnn_kernel_size),
+        cnn_stride=tuple(cnn_stride),
+        cnn_padding=padding,
+        cnn_activation=cnn_activation,
+        cnn_global_pool=str(cnn_global_pool),
+        cnn_kernel_init=cnn_kernel_init,
+    )
+
+    dummy_obs = {key: jp.zeros((1,) + shape) for key, shape in observation_size.items()}
+
+    def policy_apply(processor_params, policy_params, obs):
+        if policy_obs_key:
+            state_obs = preprocess_observations_fn(
+                obs[policy_obs_key],
+                brax_networks.normalizer_select(processor_params, policy_obs_key),
+            )
+            obs = {**obs, policy_obs_key: state_obs}
+        return module.apply(policy_params, obs, return_aux=False)
+
+    def aux_apply(processor_params, policy_params, obs):
+        if policy_obs_key:
+            state_obs = preprocess_observations_fn(
+                obs[policy_obs_key],
+                brax_networks.normalizer_select(processor_params, policy_obs_key),
+            )
+            obs = {**obs, policy_obs_key: state_obs}
+        return module.apply(policy_params, obs, return_aux=True)
+
+    policy_network = brax_networks.FeedForwardNetwork(
+        init=lambda key: module.init(key, dummy_obs, return_aux=False),
+        apply=policy_apply,
+    )
+    policy_network.aux_apply = aux_apply
+
+    value_factory_kwargs = {
+        "observation_size": observation_size,
+        "action_size": action_size,
+        "preprocess_observations_fn": preprocess_observations_fn,
+        "policy_hidden_layer_sizes": policy_hidden_layer_sizes,
+        "value_hidden_layer_sizes": value_hidden_layer_sizes,
+        "activation": activation,
+        "normalise_channels": normalise_channels,
+        "policy_obs_key": policy_obs_key,
+        "value_obs_key": value_obs_key,
+        "distribution_type": distribution_type,
+        "noise_std_type": noise_std_type,
+        "init_noise_std": init_noise_std,
+        "cnn_output_channels": cnn_output_channels,
+        "cnn_kernel_size": cnn_kernel_size,
+        "cnn_stride": cnn_stride,
+        "cnn_padding": cnn_padding,
+        "cnn_global_pool": cnn_global_pool,
+    }
+    value_network = ppo_networks_vision.make_ppo_networks_vision(
+        **_filter_kwargs(ppo_networks_vision.make_ppo_networks_vision, value_factory_kwargs)
+    ).value_network
+
+    return ppo_networks_vision.PPONetworks(
+        policy_network=policy_network,
+        value_network=value_network,
+        parametric_action_distribution=parametric_action_distribution,
+    )
+
+
+def _install_aux_tag_ppo_loss(args: Args) -> None:
+    from brax.training.agents.ppo import losses as ppo_losses
+
+    if getattr(ppo_losses.compute_ppo_loss, "_pupper_aux_tag_wrapped", False):
+        return
+
+    base_compute_ppo_loss = ppo_losses.compute_ppo_loss
+
+    def compute_ppo_loss_with_aux(*loss_args, **loss_kwargs):
+        total_loss, metrics = base_compute_ppo_loss(*loss_args, **loss_kwargs)
+        params = loss_args[0] if loss_args else loss_kwargs["params"]
+        normalizer_params = loss_args[1] if len(loss_args) > 1 else loss_kwargs["normalizer_params"]
+        data = loss_args[2] if len(loss_args) > 2 else loss_kwargs["data"]
+        ppo_network = loss_kwargs.get("ppo_network")
+        if ppo_network is None:
+            return total_loss, metrics
+        aux_apply = getattr(ppo_network.policy_network, "aux_apply", None)
+        if aux_apply is None:
+            return total_loss, metrics
+
+        data_t = jax.tree_util.tree_map(lambda x: jp.swapaxes(x, 0, 1), data)
+        obs = data_t.observation
+        required = (_AUX_TAG_VISIBLE_KEY, _AUX_TAG_U_KEY, _AUX_TAG_V_KEY, _AUX_TAG_SCALE_KEY)
+        if not isinstance(obs, Mapping) or any(key not in obs for key in required):
+            return total_loss, metrics
+
+        aux_logits = aux_apply(normalizer_params, params.policy, obs)
+        visible_target = jp.clip(obs[_AUX_TAG_VISIBLE_KEY][..., 0], 0.0, 1.0)
+        u_target = jp.clip(obs[_AUX_TAG_U_KEY][..., 0], -1.0, 1.0)
+        v_target = jp.clip(obs[_AUX_TAG_V_KEY][..., 0], -1.0, 1.0)
+        scale_target = jp.clip(obs[_AUX_TAG_SCALE_KEY][..., 0], 0.0, 1.0)
+
+        visible_logits = aux_logits[..., 0]
+        visible_loss = jp.mean(
+            jp.maximum(visible_logits, 0.0)
+            - visible_logits * visible_target
+            + jp.log1p(jp.exp(-jp.abs(visible_logits)))
+        )
+
+        visible_mask = visible_target
+        pred_u = jp.tanh(aux_logits[..., 1])
+        pred_v = jp.tanh(aux_logits[..., 2])
+        pred_scale = jax.nn.sigmoid(aux_logits[..., 3])
+        regression_sq = (
+            jp.square(pred_u - u_target)
+            + jp.square(pred_v - v_target)
+            + jp.square(pred_scale - scale_target)
+        )
+        regression_denom = jp.maximum(jp.sum(visible_mask) * 3.0, 1.0)
+        regression_loss = jp.sum(regression_sq * visible_mask) / regression_denom
+        aux_loss = (
+            float(args.aux_tag_visible_loss_coef) * visible_loss
+            + float(args.aux_tag_regression_loss_coef) * regression_loss
+        )
+        weighted_aux_loss = float(args.aux_tag_loss_coef) * aux_loss
+        pred_visible = (jax.nn.sigmoid(visible_logits) >= 0.5).astype(visible_target.dtype)
+        visible_accuracy = jp.mean((pred_visible == (visible_target >= 0.5)).astype(jp.float32))
+
+        metrics = dict(metrics)
+        metrics.update(
+            {
+                "aux_tag_loss": aux_loss,
+                "aux_tag_visible_loss": visible_loss,
+                "aux_tag_regression_loss": regression_loss,
+                "aux_tag_visible_accuracy": visible_accuracy,
+                "total_loss": total_loss + weighted_aux_loss,
+            }
+        )
+        return total_loss + weighted_aux_loss, metrics
+
+    compute_ppo_loss_with_aux._pupper_aux_tag_wrapped = True
+    ppo_losses.compute_ppo_loss = compute_ppo_loss_with_aux
 
 
 def _ensure_custom_env_registered(args: Args, envs_module: Any) -> None:
@@ -660,6 +922,7 @@ class PixelObsWrapper(Wrapper):
         self._state_key = str(args.state_obs_key)
         self._obs_grayscale = bool(args.obs_grayscale)
         self._obs_grayscale_keep_rgb_channels = bool(args.obs_grayscale_keep_rgb_channels)
+        self._aux_tag_prediction = bool(args.aux_tag_prediction)
         self._render_one = _build_single_world_renderer(env, args)
         self._render_batch = _build_batched_renderer(env, args)
 
@@ -675,14 +938,32 @@ class PixelObsWrapper(Wrapper):
             return jp.repeat(gray, repeats=3, axis=-1)
         return gray
 
-    def _make_obs(self, state_obs: jp.ndarray, pipeline_state: Any) -> Dict[str, jp.ndarray]:
+    def _add_aux_tag_obs(self, obs: Dict[str, jp.ndarray], metrics: Mapping[str, Any]) -> Dict[str, jp.ndarray]:
+        if not self._aux_tag_prediction:
+            return obs
+        visible = jp.asarray(metrics.get("apriltag_visible", 0.0), dtype=jp.float32)
+        u = jp.asarray(metrics.get("apriltag_u", 0.0), dtype=jp.float32)
+        v = jp.asarray(metrics.get("apriltag_v", 0.0), dtype=jp.float32)
+        scale = jp.asarray(metrics.get("apriltag_apparent_scale", 0.0), dtype=jp.float32)
+        obs[_AUX_TAG_VISIBLE_KEY] = visible[..., None]
+        obs[_AUX_TAG_U_KEY] = u[..., None]
+        obs[_AUX_TAG_V_KEY] = v[..., None]
+        obs[_AUX_TAG_SCALE_KEY] = scale[..., None]
+        return obs
+
+    def _make_obs(self, state_obs: jp.ndarray, pipeline_state: Any, metrics: Mapping[str, Any]) -> Dict[str, jp.ndarray]:
         pixels = self._maybe_grayscale(self._render_one(pipeline_state))
         obs = {self._pixels_key: pixels}
         if self._include_state:
             obs[self._state_key] = state_obs
-        return obs
+        return self._add_aux_tag_obs(obs, metrics)
 
-    def _make_obs_batched(self, state_obs_batched: jp.ndarray, pipeline_state_batched: Any) -> Dict[str, jp.ndarray]:
+    def _make_obs_batched(
+        self,
+        state_obs_batched: jp.ndarray,
+        pipeline_state_batched: Any,
+        metrics_batched: Mapping[str, Any],
+    ) -> Dict[str, jp.ndarray]:
         batch_n = int(state_obs_batched.shape[0])
         if batch_n == self._nworld:
             pixels = self._render_batch(pipeline_state_batched)
@@ -692,24 +973,24 @@ class PixelObsWrapper(Wrapper):
         obs = {self._pixels_key: pixels}
         if self._include_state:
             obs[self._state_key] = state_obs_batched
-        return obs
+        return self._add_aux_tag_obs(obs, metrics_batched)
 
     def reset(self, rng: jp.ndarray) -> Any:
         if hasattr(rng, "ndim") and int(rng.ndim) == 2:
             state = jax.vmap(self.env.reset)(rng)
-            obs = self._make_obs_batched(state.obs, state.pipeline_state)
+            obs = self._make_obs_batched(state.obs, state.pipeline_state, state.metrics)
             return state.replace(obs=obs)
         state = self.env.reset(rng)
-        obs = self._make_obs(state.obs, state.pipeline_state)
+        obs = self._make_obs(state.obs, state.pipeline_state, state.metrics)
         return state.replace(obs=obs)
 
     def step(self, state: Any, action: jp.ndarray) -> Any:
         if hasattr(action, "ndim") and int(action.ndim) == 2:
             nstate = jax.vmap(self.env.step)(state, action)
-            obs = self._make_obs_batched(nstate.obs, nstate.pipeline_state)
+            obs = self._make_obs_batched(nstate.obs, nstate.pipeline_state, nstate.metrics)
             return nstate.replace(obs=obs)
         nstate = self.env.step(state, action)
-        obs = self._make_obs(nstate.obs, nstate.pipeline_state)
+        obs = self._make_obs(nstate.obs, nstate.pipeline_state, nstate.metrics)
         return nstate.replace(obs=obs)
 
 
@@ -998,6 +1279,15 @@ def main(args: Args) -> None:
     if obs_source not in {"pixels", "env_camera_features"}:
         raise ValueError("obs_source must be one of: pixels, env_camera_features")
     use_pixel_obs = obs_source == "pixels"
+    if bool(args.aux_tag_prediction) and not use_pixel_obs:
+        raise ValueError("--aux-tag-prediction is only supported with --obs-source pixels")
+    if bool(args.aux_tag_prediction):
+        _install_aux_tag_ppo_loss(args)
+        print(
+            "info: auxiliary tag prediction enabled "
+            f"(loss_coef={args.aux_tag_loss_coef}, visible_coef={args.aux_tag_visible_loss_coef}, "
+            f"regression_coef={args.aux_tag_regression_loss_coef})"
+        )
 
     base_env = envs.get_environment(args.env_name, **env_kwargs)
     if use_pixel_obs:
@@ -1096,10 +1386,18 @@ def main(args: Args) -> None:
                 "warning: installed Brax vision network factory does not support: "
                 + ", ".join(dropped_vision_keys)
             )
-        network_factory = functools.partial(
-            ppo_networks_vision.make_ppo_networks_vision,
-            **filtered_vision_factory_kwargs,
-        )
+        if bool(args.aux_tag_prediction):
+            aux_factory_kwargs = dict(vision_factory_kwargs)
+            aux_factory_kwargs.setdefault("activation", jax.nn.swish)
+            network_factory = functools.partial(
+                _make_aux_tag_ppo_vision_networks,
+                **aux_factory_kwargs,
+            )
+        else:
+            network_factory = functools.partial(
+                ppo_networks_vision.make_ppo_networks_vision,
+                **filtered_vision_factory_kwargs,
+            )
         run_name = f"{args.exp_name}_{time.strftime('%Y%m%d-%H%M%S')}_brax_vision"
     else:
         mlp_factory_kwargs = {

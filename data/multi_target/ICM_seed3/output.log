@@ -1,0 +1,75 @@
+info: wandb logging mode: task (task_keys=eval/episode_reward,eval/episode_reward_std,eval/episode_goals_collected,eval/episode_goal_distance,eval/episode_collect_streak,eval/episode_apriltag_visible,train/icm_reward,train/icm_reward_weight,train/icm_forward_loss,train/icm_inverse_loss,train/icm_total_loss,avg_reward,success rate,sps)
+using training profile: apriltag_walls_camera_nopriv_hl_level3
+reward setup: module=<default>, requires_command=False, resample_velocity_step=<default>, lin_vel_x_range=<default>, lin_vel_y_range=<default>, ang_vel_yaw_range=<default>, zero_command_probability=<default>
+/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/brax/io/mjcf.py:480: UserWarning: Brax System, piplines and environments are not actively being maintained. Please see MJX for a well maintained JAX-based physics engine: https://github.com/google-deepmind/mujoco/tree/main/mjx. For a host of environments that use MJX, see: https://github.com/google-deepmind/mujoco_playground.
+  warnings.warn(
+[PupperV2BraxEnv] resolved reward settings: reward_mode=apriltag_walls, effective_reward_mode=apriltag_walls, reward_module=puppersimMJX.tasks.apriltag_walls.reward, reward_requires_command=False, reward_config_keys=['action_penalty_weight', 'collect_bonus', 'collect_radius_m', 'distance_penalty_weight', 'require_visibility_for_collect', 'use_sparse_distance_collect_reward']
+[PupperV2BraxEnv] loaded low-level policy bundle: path=/home/emiliano/experiments/robots/IFT6163_Project/puppersimMJX/pretrained_policies/cc_locomotion/policy_bundle, obs_dim=760, action_dim=12, history=20, activation=elu
+[PupperV2BraxEnv] action space: act_size=12, policy_action_size=3, action_scale=0.75, low=[-0.18000000715255737, 0.10000000149011612, -2.299999952316284, -0.18000000715255737, 0.10000000149011612, -2.299999952316284, -0.18000000715255737, 0.10000000149011612, -2.299999952316284, -0.18000000715255737, 0.10000000149011612, -2.299999952316284], high=[0.18000000715255737, 0.699999988079071, -0.6000000238418579, 0.18000000715255737, 0.699999988079071, -0.6000000238418579, 0.18000000715255737, 0.699999988079071, -0.6000000238418579, 0.18000000715255737, 0.699999988079071, -0.6000000238418579]
+[PupperV2BraxEnv] high-level command rate: target_hz=8.000, hold_steps=3, effective_hz=8.333
+[PupperV2BraxEnv] resolved reward settings: reward_mode=apriltag_walls, effective_reward_mode=apriltag_walls, reward_module=puppersimMJX.tasks.apriltag_walls.reward, reward_requires_command=False, reward_config_keys=['action_penalty_weight', 'collect_bonus', 'collect_radius_m', 'distance_penalty_weight', 'require_visibility_for_collect', 'use_sparse_distance_collect_reward']
+[PupperV2BraxEnv] loaded low-level policy bundle: path=/home/emiliano/experiments/robots/IFT6163_Project/puppersimMJX/pretrained_policies/cc_locomotion/policy_bundle, obs_dim=760, action_dim=12, history=20, activation=elu
+[PupperV2BraxEnv] action space: act_size=12, policy_action_size=3, action_scale=0.75, low=[-0.18000000715255737, 0.10000000149011612, -2.299999952316284, -0.18000000715255737, 0.10000000149011612, -2.299999952316284, -0.18000000715255737, 0.10000000149011612, -2.299999952316284, -0.18000000715255737, 0.10000000149011612, -2.299999952316284], high=[0.18000000715255737, 0.699999988079071, -0.6000000238418579, 0.18000000715255737, 0.699999988079071, -0.6000000238418579, 0.18000000715255737, 0.699999988079071, -0.6000000238418579, 0.18000000715255737, 0.699999988079071, -0.6000000238418579]
+[PupperV2BraxEnv] high-level command rate: target_hz=8.000, hold_steps=3, effective_hz=8.333
+ICM enabled: feature_dim=64, hidden_dim=128, lr=0.0003, beta=0.2, eta=1.0, weight=0.005->0.0, anneal=linear/100000000, clip=0.0
+/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/jax/_src/interpreters/xla.py:119: RuntimeWarning: overflow encountered in cast
+  return np.asarray(x, dtypes.canonicalize_dtype(x.dtype))
+num_steps=0, SPS=0, eval/episode_reward=0.000, eval/episode_reward_std=0.000
+num_steps=5242880, SPS=15576, eval/episode_reward=0.078, eval/episode_reward_std=0.880, train/kl_mean=6.883
+checkpoint saved to runs/level3_icm_decay_0p005_seed3_20260426_2028_mjx/checkpoints/puppermjx_train_ppo_step_000010485760.npz (npz)
+num_steps=10485760, SPS=21250, eval/episode_reward=0.234, eval/episode_reward_std=1.962, train/kl_mean=0.006
+num_steps=15728640, SPS=24186, eval/episode_reward=0.234, eval/episode_reward_std=1.962, train/kl_mean=0.006
+checkpoint saved to runs/level3_icm_decay_0p005_seed3_20260426_2028_mjx/checkpoints/puppermjx_train_ppo_step_000020971520.npz (npz)
+video rollout apriltag_wall_ids_seen=[0]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/subprocess.py:1796: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = _posixsubprocess.fork_exec(
+training video saved to videos/level3_icm_decay_0p005_seed3_20260426_2028_mjx/puppermjx_train_ppo_step_000020971520.mp4
+/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/jax/_src/interpreters/xla.py:119: RuntimeWarning: overflow encountered in cast
+  return np.asarray(x, dtypes.canonicalize_dtype(x.dtype))
+training report saved to reports/level3_icm_decay_0p005_seed3_20260426_2028_mjx/puppermjx_train_ppo_step_000020971520.png
+num_steps=20971520, SPS=19169, eval/episode_reward=0.078, eval/episode_reward_std=0.880, train/kl_mean=0.006
+num_steps=26214400, SPS=20941, eval/episode_reward=0.234, eval/episode_reward_std=1.513, train/kl_mean=0.007
+checkpoint saved to runs/level3_icm_decay_0p005_seed3_20260426_2028_mjx/checkpoints/puppermjx_train_ppo_step_000031457280.npz (npz)
+num_steps=31457280, SPS=22225, eval/episode_reward=0.391, eval/episode_reward_std=2.306, train/kl_mean=0.008
+num_steps=36700160, SPS=23285, eval/episode_reward=1.406, eval/episode_reward_std=4.095, train/kl_mean=0.007
+checkpoint saved to runs/level3_icm_decay_0p005_seed3_20260426_2028_mjx/checkpoints/puppermjx_train_ppo_step_000041943040.npz (npz)
+video rollout apriltag_wall_ids_seen=[2]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/subprocess.py:1796: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = _posixsubprocess.fork_exec(
+training video saved to videos/level3_icm_decay_0p005_seed3_20260426_2028_mjx/puppermjx_train_ppo_step_000041943040.mp4
+training report saved to reports/level3_icm_decay_0p005_seed3_20260426_2028_mjx/puppermjx_train_ppo_step_000041943040.png
+num_steps=41943040, SPS=20632, eval/episode_reward=3.906, eval/episode_reward_std=6.759, train/kl_mean=0.007
+num_steps=47185920, SPS=21523, eval/episode_reward=19.297, eval/episode_reward_std=14.207, train/kl_mean=0.008
+checkpoint saved to runs/level3_icm_decay_0p005_seed3_20260426_2028_mjx/checkpoints/puppermjx_train_ppo_step_000052428800.npz (npz)
+num_steps=52428800, SPS=22304, eval/episode_reward=37.891, eval/episode_reward_std=7.033, train/kl_mean=0.010
+num_steps=57671680, SPS=22948, eval/episode_reward=38.750, eval/episode_reward_std=6.250, train/kl_mean=0.009
+checkpoint saved to runs/level3_icm_decay_0p005_seed3_20260426_2028_mjx/checkpoints/puppermjx_train_ppo_step_000062914560.npz (npz)
+video rollout apriltag_wall_ids_seen=[0, 1, 2]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+training video saved to videos/level3_icm_decay_0p005_seed3_20260426_2028_mjx/puppermjx_train_ppo_step_000062914560.mp4
+training report saved to reports/level3_icm_decay_0p005_seed3_20260426_2028_mjx/puppermjx_train_ppo_step_000062914560.png
+num_steps=62914560, SPS=21149, eval/episode_reward=39.297, eval/episode_reward_std=4.539, train/kl_mean=0.012
+num_steps=68157440, SPS=21744, eval/episode_reward=38.203, eval/episode_reward_std=7.228, train/kl_mean=0.012
+checkpoint saved to runs/level3_icm_decay_0p005_seed3_20260426_2028_mjx/checkpoints/puppermjx_train_ppo_step_000073400320.npz (npz)
+num_steps=73400320, SPS=22207, eval/episode_reward=38.203, eval/episode_reward_std=7.749, train/kl_mean=0.005
+num_steps=78643200, SPS=22632, eval/episode_reward=37.969, eval/episode_reward_std=7.327, train/kl_mean=0.005
+checkpoint saved to runs/level3_icm_decay_0p005_seed3_20260426_2028_mjx/checkpoints/puppermjx_train_ppo_step_000083886080.npz (npz)
+video rollout apriltag_wall_ids_seen=[0, 1, 2, 3]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+training video saved to videos/level3_icm_decay_0p005_seed3_20260426_2028_mjx/puppermjx_train_ppo_step_000083886080.mp4
+training report saved to reports/level3_icm_decay_0p005_seed3_20260426_2028_mjx/puppermjx_train_ppo_step_000083886080.png
+num_steps=83886080, SPS=21165, eval/episode_reward=38.906, eval/episode_reward_std=5.189, train/kl_mean=0.004
+num_steps=89128960, SPS=21557, eval/episode_reward=38.828, eval/episode_reward_std=5.394, train/kl_mean=0.004
+checkpoint saved to runs/level3_icm_decay_0p005_seed3_20260426_2028_mjx/checkpoints/puppermjx_train_ppo_step_000094371840.npz (npz)
+num_steps=94371840, SPS=21921, eval/episode_reward=36.719, eval/episode_reward_std=10.163, train/kl_mean=0.004
+num_steps=99614720, SPS=22260, eval/episode_reward=37.031, eval/episode_reward_std=9.300, train/kl_mean=0.004
+checkpoint saved to runs/level3_icm_decay_0p005_seed3_20260426_2028_mjx/checkpoints/puppermjx_train_ppo_step_000104857600.npz (npz)
+video rollout apriltag_wall_ids_seen=[0, 2, 3]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+training video saved to videos/level3_icm_decay_0p005_seed3_20260426_2028_mjx/puppermjx_train_ppo_step_000104857600.mp4
+training report saved to reports/level3_icm_decay_0p005_seed3_20260426_2028_mjx/puppermjx_train_ppo_step_000104857600.png
+num_steps=104857600, SPS=21079, eval/episode_reward=37.500, eval/episode_reward_std=8.101, train/kl_mean=0.004
+training complete in 4975.7s
+model saved to runs/level3_icm_decay_0p005_seed3_20260426_2028_mjx/puppermjx_train_ppo.npz (npz)

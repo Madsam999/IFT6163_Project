@@ -1,0 +1,95 @@
+info: wandb logging mode: task (task_keys=eval/episode_reward,eval/episode_reward_std,eval/episode_goals_collected,eval/episode_goal_distance,eval/episode_collect_streak,eval/episode_apriltag_visible,train/icm_reward,train/icm_reward_weight,train/icm_forward_loss,train/icm_inverse_loss,train/icm_total_loss,avg_reward,success rate,sps)
+using training profile: apriltag_walls_camera_nopriv_hl_level3
+reward setup: module=<default>, requires_command=False, resample_velocity_step=<default>, lin_vel_x_range=<default>, lin_vel_y_range=<default>, ang_vel_yaw_range=<default>, zero_command_probability=<default>
+/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/brax/io/mjcf.py:480: UserWarning: Brax System, piplines and environments are not actively being maintained. Please see MJX for a well maintained JAX-based physics engine: https://github.com/google-deepmind/mujoco/tree/main/mjx. For a host of environments that use MJX, see: https://github.com/google-deepmind/mujoco_playground.
+  warnings.warn(
+[PupperV2BraxEnv] resolved reward settings: reward_mode=apriltag_walls, effective_reward_mode=apriltag_walls, reward_module=puppersimMJX.tasks.apriltag_walls.reward, reward_requires_command=False, reward_config_keys=['action_penalty_weight', 'collect_bonus', 'collect_radius_m', 'distance_penalty_weight', 'require_visibility_for_collect', 'use_sparse_distance_collect_reward']
+[PupperV2BraxEnv] loaded low-level policy bundle: path=/home/emiliano/experiments/robots/IFT6163_Project/puppersimMJX/pretrained_policies/cc_locomotion/policy_bundle, obs_dim=760, action_dim=12, history=20, activation=elu
+[PupperV2BraxEnv] action space: act_size=12, policy_action_size=3, action_scale=0.75, low=[-0.18000000715255737, 0.10000000149011612, -2.299999952316284, -0.18000000715255737, 0.10000000149011612, -2.299999952316284, -0.18000000715255737, 0.10000000149011612, -2.299999952316284, -0.18000000715255737, 0.10000000149011612, -2.299999952316284], high=[0.18000000715255737, 0.699999988079071, -0.6000000238418579, 0.18000000715255737, 0.699999988079071, -0.6000000238418579, 0.18000000715255737, 0.699999988079071, -0.6000000238418579, 0.18000000715255737, 0.699999988079071, -0.6000000238418579]
+[PupperV2BraxEnv] high-level command rate: target_hz=8.000, hold_steps=3, effective_hz=8.333
+[PupperV2BraxEnv] resolved reward settings: reward_mode=apriltag_walls, effective_reward_mode=apriltag_walls, reward_module=puppersimMJX.tasks.apriltag_walls.reward, reward_requires_command=False, reward_config_keys=['action_penalty_weight', 'collect_bonus', 'collect_radius_m', 'distance_penalty_weight', 'require_visibility_for_collect', 'use_sparse_distance_collect_reward']
+[PupperV2BraxEnv] loaded low-level policy bundle: path=/home/emiliano/experiments/robots/IFT6163_Project/puppersimMJX/pretrained_policies/cc_locomotion/policy_bundle, obs_dim=760, action_dim=12, history=20, activation=elu
+[PupperV2BraxEnv] action space: act_size=12, policy_action_size=3, action_scale=0.75, low=[-0.18000000715255737, 0.10000000149011612, -2.299999952316284, -0.18000000715255737, 0.10000000149011612, -2.299999952316284, -0.18000000715255737, 0.10000000149011612, -2.299999952316284, -0.18000000715255737, 0.10000000149011612, -2.299999952316284], high=[0.18000000715255737, 0.699999988079071, -0.6000000238418579, 0.18000000715255737, 0.699999988079071, -0.6000000238418579, 0.18000000715255737, 0.699999988079071, -0.6000000238418579, 0.18000000715255737, 0.699999988079071, -0.6000000238418579]
+[PupperV2BraxEnv] high-level command rate: target_hz=8.000, hold_steps=3, effective_hz=8.333
+ICM enabled: feature_dim=64, hidden_dim=128, lr=0.0003, beta=0.2, eta=1.0, weight=0.005->0.0, anneal=linear/100000000, clip=0.0
+/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/jax/_src/interpreters/xla.py:119: RuntimeWarning: overflow encountered in cast
+  return np.asarray(x, dtypes.canonicalize_dtype(x.dtype))
+num_steps=0, SPS=0, eval/episode_reward=8.750, eval/episode_reward_std=6.495
+num_steps=5242880, SPS=14440, eval/episode_reward=0.000, eval/episode_reward_std=0.000, train/kl_mean=579053696.000
+checkpoint saved to runs/level3_icm_decay_0p005_seed1_20260426_1521_mjx/checkpoints/puppermjx_train_ppo_step_000010485760.npz (npz)
+video rollout apriltag_wall_ids_seen=[3]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/subprocess.py:1796: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = _posixsubprocess.fork_exec(
+training video saved to videos/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000010485760.mp4
+/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/site-packages/jax/_src/interpreters/xla.py:119: RuntimeWarning: overflow encountered in cast
+  return np.asarray(x, dtypes.canonicalize_dtype(x.dtype))
+training report saved to reports/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000010485760.png
+num_steps=10485760, SPS=13101, eval/episode_reward=0.000, eval/episode_reward_std=0.000, train/kl_mean=0.005
+num_steps=15728640, SPS=16447, eval/episode_reward=0.000, eval/episode_reward_std=0.000, train/kl_mean=0.006
+checkpoint saved to runs/level3_icm_decay_0p005_seed1_20260426_1521_mjx/checkpoints/puppermjx_train_ppo_step_000020971520.npz (npz)
+video rollout apriltag_wall_ids_seen=[0]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+/home/emiliano/anaconda3/envs/rl_pupper_mjx/lib/python3.10/subprocess.py:1796: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = _posixsubprocess.fork_exec(
+training video saved to videos/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000020971520.mp4
+training report saved to reports/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000020971520.png
+num_steps=20971520, SPS=15011, eval/episode_reward=0.625, eval/episode_reward_std=2.421, train/kl_mean=0.006
+num_steps=26214400, SPS=16878, eval/episode_reward=0.625, eval/episode_reward_std=2.724, train/kl_mean=0.007
+checkpoint saved to runs/level3_icm_decay_0p005_seed1_20260426_1521_mjx/checkpoints/puppermjx_train_ppo_step_000031457280.npz (npz)
+video rollout apriltag_wall_ids_seen=[3]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+training video saved to videos/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000031457280.mp4
+training report saved to reports/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000031457280.png
+num_steps=31457280, SPS=15539, eval/episode_reward=1.250, eval/episode_reward_std=3.750, train/kl_mean=0.009
+num_steps=36700160, SPS=16701, eval/episode_reward=1.484, eval/episode_reward_std=4.163, train/kl_mean=0.011
+checkpoint saved to runs/level3_icm_decay_0p005_seed1_20260426_1521_mjx/checkpoints/puppermjx_train_ppo_step_000041943040.npz (npz)
+video rollout apriltag_wall_ids_seen=[3]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+training video saved to videos/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000041943040.mp4
+training report saved to reports/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000041943040.png
+num_steps=41943040, SPS=15586, eval/episode_reward=1.250, eval/episode_reward_std=4.146, train/kl_mean=0.011
+num_steps=47185920, SPS=16480, eval/episode_reward=1.016, eval/episode_reward_std=3.716, train/kl_mean=0.012
+checkpoint saved to runs/level3_icm_decay_0p005_seed1_20260426_1521_mjx/checkpoints/puppermjx_train_ppo_step_000052428800.npz (npz)
+video rollout apriltag_wall_ids_seen=[1]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+training video saved to videos/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000052428800.mp4
+training report saved to reports/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000052428800.png
+num_steps=52428800, SPS=15573, eval/episode_reward=0.547, eval/episode_reward_std=2.880, train/kl_mean=0.012
+num_steps=57671680, SPS=16345, eval/episode_reward=0.312, eval/episode_reward_std=1.740, train/kl_mean=0.014
+checkpoint saved to runs/level3_icm_decay_0p005_seed1_20260426_1521_mjx/checkpoints/puppermjx_train_ppo_step_000062914560.npz (npz)
+video rollout apriltag_wall_ids_seen=[2]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+training video saved to videos/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000062914560.mp4
+training report saved to reports/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000062914560.png
+num_steps=62914560, SPS=15698, eval/episode_reward=1.016, eval/episode_reward_std=4.650, train/kl_mean=0.014
+num_steps=68157440, SPS=16345, eval/episode_reward=0.391, eval/episode_reward_std=2.623, train/kl_mean=0.010
+checkpoint saved to runs/level3_icm_decay_0p005_seed1_20260426_1521_mjx/checkpoints/puppermjx_train_ppo_step_000073400320.npz (npz)
+video rollout apriltag_wall_ids_seen=[0]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+training video saved to videos/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000073400320.mp4
+training report saved to reports/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000073400320.png
+num_steps=73400320, SPS=15791, eval/episode_reward=0.547, eval/episode_reward_std=3.814, train/kl_mean=0.009
+num_steps=78643200, SPS=16364, eval/episode_reward=0.469, eval/episode_reward_std=3.026, train/kl_mean=0.008
+checkpoint saved to runs/level3_icm_decay_0p005_seed1_20260426_1521_mjx/checkpoints/puppermjx_train_ppo_step_000083886080.npz (npz)
+video rollout apriltag_wall_ids_seen=[1]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+training video saved to videos/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000083886080.mp4
+training report saved to reports/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000083886080.png
+num_steps=83886080, SPS=15903, eval/episode_reward=0.625, eval/episode_reward_std=4.285, train/kl_mean=0.010
+num_steps=89128960, SPS=16408, eval/episode_reward=0.625, eval/episode_reward_std=4.098, train/kl_mean=0.009
+checkpoint saved to runs/level3_icm_decay_0p005_seed1_20260426_1521_mjx/checkpoints/puppermjx_train_ppo_step_000094371840.npz (npz)
+video rollout apriltag_wall_ids_seen=[1]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+training video saved to videos/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000094371840.mp4
+training report saved to reports/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000094371840.png
+num_steps=94371840, SPS=16025, eval/episode_reward=0.859, eval/episode_reward_std=4.512, train/kl_mean=0.010
+num_steps=99614720, SPS=16477, eval/episode_reward=0.859, eval/episode_reward_std=5.307, train/kl_mean=0.010
+checkpoint saved to runs/level3_icm_decay_0p005_seed1_20260426_1521_mjx/checkpoints/puppermjx_train_ppo_step_000104857600.npz (npz)
+video rollout apriltag_wall_ids_seen=[1, 3]
+info: using MuJoCo renderer for apriltag_walls goal + geom sync
+training video saved to videos/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000104857600.mp4
+training report saved to reports/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo_step_000104857600.png
+num_steps=104857600, SPS=16123, eval/episode_reward=5.078, eval/episode_reward_std=12.500, train/kl_mean=0.020
+training complete in 6504.7s
+model saved to runs/level3_icm_decay_0p005_seed1_20260426_1521_mjx/puppermjx_train_ppo.npz (npz)

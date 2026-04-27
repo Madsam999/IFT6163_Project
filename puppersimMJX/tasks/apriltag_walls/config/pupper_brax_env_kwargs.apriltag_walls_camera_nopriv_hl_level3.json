@@ -10,7 +10,7 @@
   "reward_config": {
     "use_sparse_distance_collect_reward": true,
     "distance_penalty_weight": 0.0,
-    "collect_radius_m": 0.1,
+    "collect_radius_m": 0.5,
     "collect_bonus": 10.0,
     "require_visibility_for_collect": true,
     "action_penalty_weight": 0.0

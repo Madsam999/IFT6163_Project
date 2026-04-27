@@ -98,6 +98,10 @@ class Args:
     """episode length"""
     eval_interval: int = 5_000_000
     """target interval in env steps between eval/log updates"""
+    log_training_metrics: bool = True
+    """ask Brax PPO to emit train/* metrics, including ICM metrics when enabled"""
+    training_metrics_steps: int = 0
+    """target interval in env steps for train/* metrics (<=0 uses eval_interval)"""
     reward_scaling: float = 1.0
     """reward scaling used by Brax PPO"""
     normalize_observations: bool = True
@@ -1153,11 +1157,11 @@ if __name__ == "__main__":
     checkpoint_state = {"next_step": max(1, int(args.checkpoint_interval))}
     eval_log_state = {"next_step": 0}
     video_state = {
-        "next_step": 0,
+        "next_step": max(1, int(args.video_eval_interval)),
         "initial_saved": False,
     }
     report_state = {
-        "next_step": 0,
+        "next_step": max(1, int(args.report_eval_interval)),
         "initial_saved": False,
     }
     log_state = {"max_step": 0}
@@ -1188,10 +1192,6 @@ if __name__ == "__main__":
     def progress_fn(num_steps: int, metrics: Mapping[str, Any]):
         step = int(num_steps)
         log_state["max_step"] = max(log_state["max_step"], step)
-        if step < eval_log_state["next_step"]:
-            return
-        while eval_log_state["next_step"] <= step:
-            eval_log_state["next_step"] += max(1, int(args.eval_interval))
 
         elapsed = max(1e-6, time.time() - training_start)
         sps = int(step / elapsed)
@@ -1235,11 +1235,21 @@ if __name__ == "__main__":
                 wandb.log(payload, step=step)
             except Exception as exc:
                 print(f"wandb.log failed at step={step}: {exc}")
-        reward_keys = ("eval/episode_reward", "eval/episode_reward_std", "training/episode_reward")
-        reward_summary = ", ".join(
-            [f"{key}={_as_float(metrics.get(key)):.3f}" for key in reward_keys if _as_float(metrics.get(key)) is not None]
+        summary_keys = (
+            "eval/episode_reward",
+            "eval/episode_reward_std",
+            "train/episode_reward",
+            "train/kl_mean",
+            "train/icm_reward",
+            "train/icm_reward_weight",
+            "train/icm_forward_loss",
         )
-        suffix = f", {reward_summary}" if reward_summary else ""
+        summary_parts = [
+            f"{key}={simplified_metrics[key]:.3f}"
+            for key in summary_keys
+            if key in simplified_metrics
+        ]
+        suffix = f", {', '.join(summary_parts)}" if summary_parts else ""
         print(f"num_steps={num_steps}, SPS={sps}{suffix}")
 
     def policy_params_fn(current_step: int, _make_policy: Callable[..., Any], params: Any):
@@ -1460,6 +1470,11 @@ if __name__ == "__main__":
         "progress_fn": progress_fn,
         "policy_params_fn": policy_params_fn,
     }
+    train_kwargs["log_training_metrics"] = bool(args.log_training_metrics)
+    if int(args.training_metrics_steps) > 0:
+        train_kwargs["training_metrics_steps"] = int(args.training_metrics_steps)
+    elif bool(args.log_training_metrics):
+        train_kwargs["training_metrics_steps"] = int(args.eval_interval)
     if wrap_env_fn is not None:
         train_kwargs["wrap_env_fn"] = wrap_env_fn
 
