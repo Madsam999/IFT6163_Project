@@ -1,0 +1,25 @@
+diff --git a/deploy_to_robot.sh b/deploy_to_robot.sh
+index ed378f4..4d61d0f 100755
+--- a/deploy_to_robot.sh
++++ b/deploy_to_robot.sh
+@@ -1,15 +1,17 @@
+ #!/bin/bash
+ 
++REMOTE_HOST=${REMOTE_HOST:-raspberrypi.local}
++
+ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+-  REMOTE=`avahi-resolve-host-name raspberrypi.local -4 | awk '{print $2}'`
++  REMOTE=`avahi-resolve-host-name ${REMOTE_HOST} -4 | awk '{print $2}'`
+ elif [[ "$OSTYPE" == "darwin"* ]]; then
+-  REMOTE=192.168.1.100 #raspberrypi.local
++  REMOTE=${REMOTE_HOST}
+ else
+   print "not supported os"
+   exit 1
+ fi
+ 
+-echo PI addrees is "${REMOTE}"
++echo PI address is "${REMOTE}"
+ REMOTE_DIR=/home/pi/puppersim_deploy
+ 
+ ssh pi@${REMOTE}  mkdir -p ${REMOTE_DIR}

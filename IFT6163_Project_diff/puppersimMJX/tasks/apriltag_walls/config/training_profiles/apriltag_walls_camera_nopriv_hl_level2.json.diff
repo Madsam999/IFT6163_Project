@@ -1,0 +1,20 @@
+diff --git a/puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_nopriv_hl_level2.json b/puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_nopriv_hl_level2.json
+new file mode 100644
+index 0000000..08c0911
+--- /dev/null
++++ b/puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_nopriv_hl_level2.json
+@@ -0,0 +1,14 @@
++{
++  "name": "apriltag_walls_camera_nopriv_hl_level2",
++  "description": "Level 2: same as level 1 but randomizes AprilTag wall selection across all walls.",
++  "env_kwargs": "puppersimMJX/tasks/apriltag_walls/config/pupper_brax_env_kwargs.apriltag_walls_camera_nopriv_hl_level2.json",
++  "train_overrides": {
++    "learning_rate": 0.0001,
++    "learning_rate_schedule": "linear",
++    "learning_rate_final": 0.00001,
++    "learning_rate_anneal_steps": 100000000,
++    "entropy_cost": 0.001,
++    "discounting": 0.995,
++    "unroll_length": 128
++  }
++}

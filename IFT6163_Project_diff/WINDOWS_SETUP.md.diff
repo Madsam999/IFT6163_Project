@@ -1,0 +1,179 @@
+diff --git a/WINDOWS_SETUP.md b/WINDOWS_SETUP.md
+new file mode 100644
+index 0000000..4eac3db
+--- /dev/null
++++ b/WINDOWS_SETUP.md
+@@ -0,0 +1,173 @@
++# Windows Setup Guide
++
++Step-by-step instructions to get the project running on Windows 11.
++
++## Prerequisites (install once)
++
++### 1. Visual Studio Build Tools 2022
++Required to compile the custom PyBullet fork from source.
++
++Download from: https://visualstudio.microsoft.com/visual-cpp-build-tools/
++
++During installation, select the **"Desktop development with C++"** workload only.
++
++### 2. CMake
++```bash
++winget install Kitware.CMake
++```
++Restart your terminal after installation so `cmake` is on PATH.
++
++### 3. Miniconda
++Download and install from: https://docs.conda.io/en/latest/miniconda.html
++
++---
++
++## Step 1 — Create the conda environment
++
++> **Important:** Python 3.13 (the default) is too new for PyBullet. Use 3.10.
++
++```bash
++conda create -n IFT6163_Project python=3.10 -y
++conda activate IFT6163_Project
++```
++
++---
++
++## Step 2 — Install PyTorch
++
++Go to https://pytorch.org/get-started/locally/ and select your CUDA version.
++
++**CUDA 12.1 (recommended if you have an NVIDIA GPU):**
++```bash
++pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
++```
++
++**CPU only:**
++```bash
++pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
++```
++
++---
++
++## Step 3 — Fix setuptools / pkg_resources
++
++The conda-installed setuptools is too new and is missing `pkg_resources`. Downgrade it:
++
++```bash
++pip install "setuptools==69.5.1"
++```
++
++Verify it works:
++```bash
++python -c "import pkg_resources; print('ok')"
++```
++
++---
++
++## Step 4 — Build the custom bullet3 fork
++
++The standard `pybullet` on PyPI is missing the `pybullet_envs.minitaur` module.
++You must build the UdeM fork from source.
++
++> **Important:** Run this from a **"Developer Command Prompt for VS 2022"** or from a regular terminal **after** activating the conda environment. The C++ compiler must be on PATH.
++
++```bash
++cd C:\path\to\your\workspace
++git clone https://github.com/montrealrobotics/bullet3.git
++cd bullet3
++pip install -e .
++```
++
++This takes a few minutes (compiling C++).
++
++---
++
++## Step 5 — Fix the bullet3 gym compatibility bug
++
++The minitaur environment has a line that is incompatible with gym >= 0.22. Patch it manually:
++
++Open this file:
++```
++bullet3/examples/pybullet/gym/pybullet_envs/minitaur/envs_v2/locomotion_gym_env.py
++```
++
++Find this method (around line 267):
++```python
++def seed(self, seed=None):
++    self.np_random, self.np_random_seed = gym.utils.seeding.np_random(seed)
++    return [self.np_random_seed]
++```
++
++Change it to:
++```python
++def seed(self, seed=None):
++    self.np_random, self._np_random_seed = gym.utils.seeding.np_random(seed)
++    return [self._np_random_seed]
++```
++
++---
++
++## Step 6 — Install remaining dependencies
++
++```bash
++pip install "gym==0.25.2"
++pip install "protobuf==3.20.3"
++pip install numpy scipy absl-py gin-config attrs six pyserial tensorboard tyro moviepy
++```
++
++---
++
++## Step 7 — Install puppersim
++
++From the root of this repository:
++```bash
++pip install -e .
++```
++
++---
++
++## Step 8 — Verify the installation
++
++```bash
++python puppersim/pupper_example.py
++```
++
++The PyBullet GUI should open and show the Pupper robot doing pushups.
++
++**If the GUI runs slowly**, use the two-process mode:
++```bash
++# Terminal 1
++python puppersim/pupper_minimal_server.py
++
++# Terminal 2
++python puppersim/pupper_example.py --render=False
++```
++
++---
++
++## Step 9 — Test a training run
++
++**Baseline (extrinsic reward only):**
++```bash
++python puppersim/pupper_train_ppo_cont_action.py --env-id PupperGymEnv-v0 --total-timesteps 5000 --seed 1
++```
++
++**With ICM (intrinsic curiosity):**
++```bash
++python puppersim/pupper_train_ppo_cont_action.py --env-id PupperGymEnv-v0 --total-timesteps 5000 --seed 1 --use-icm
++```
++
++---
++
++## Troubleshooting
++
++| Error | Fix |
++|---|---|
++| `No module named 'gym'` | `pip install "gym==0.25.2"` |
++| `Descriptors cannot be created directly` | `pip install "protobuf==3.20.3"` |
++| `No module named 'pkg_resources'` | `pip install "setuptools==69.5.1"` |
++| `can't set attribute 'np_random_seed'` | Apply the patch in Step 5 |
++| `cl.exe not found` during bullet3 build | Open a Developer Command Prompt for VS 2022 |
++| `ModuleNotFoundError: pybullet_envs` | bullet3 build failed — check build output for C++ errors |
++| PyBullet GUI hangs | Use the two-process mode described in Step 8 |
++| `ImportError: pupper_hardware_interface` | Only needed for real robot deployment — safe to ignore for sim |

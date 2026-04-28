@@ -1,0 +1,21 @@
+diff --git a/puppersim/pupper_constants.py b/puppersim/pupper_constants.py
+index 0e19bd5..06d0c9f 100644
+--- a/puppersim/pupper_constants.py
++++ b/puppersim/pupper_constants.py
+@@ -21,7 +21,15 @@ from __future__ import division
+ from __future__ import print_function
+ 
+ import collections
+-import gin
++try:
++  import gin
++except Exception:
++  class _GinShim:
++    @staticmethod
++    def constant(*args, **kwargs):
++      del args, kwargs
++      return None
++  gin = _GinShim()
+ import numpy as np
+ import puppersim.data as pd
+ URDF_PATH = pd.getDataPath()+"/pupper_v2a.urdf" #or pupper_v2b with toes, but no visual meshes

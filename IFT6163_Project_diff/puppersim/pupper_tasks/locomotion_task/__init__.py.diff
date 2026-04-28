@@ -1,0 +1,12 @@
+diff --git a/puppersim/pupper_tasks/locomotion_task/__init__.py b/puppersim/pupper_tasks/locomotion_task/__init__.py
+new file mode 100644
+index 0000000..8ee8e21
+--- /dev/null
++++ b/puppersim/pupper_tasks/locomotion_task/__init__.py
+@@ -0,0 +1,6 @@
++"""Low-level locomotion task package."""
++
++from puppersim.pupper_tasks.locomotion_task.command_locomotion_task import CommandLocomotionTask
++
++__all__ = ["CommandLocomotionTask"]
++

@@ -1,0 +1,20 @@
+diff --git a/puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_nopriv_hl_level1_pixels_80x80.json b/puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_nopriv_hl_level1_pixels_80x80.json
+new file mode 100644
+index 0000000..3ba8140
+--- /dev/null
++++ b/puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_nopriv_hl_level1_pixels_80x80.json
+@@ -0,0 +1,14 @@
++{
++  "name": "apriltag_walls_camera_nopriv_hl_level1_pixels_80x80",
++  "description": "Level 1 pixel PPO profile (80x80). Matches level-1 no-pixel HL training overrides, except unroll length set to 32 for pixel training.",
++  "env_kwargs": "puppersimMJX/tasks/apriltag_walls/config/pupper_brax_env_kwargs.apriltag_walls_camera_nopriv_hl.json",
++  "train_overrides": {
++    "learning_rate": 0.0001,
++    "learning_rate_schedule": "linear",
++    "learning_rate_final": 0.00001,
++    "learning_rate_anneal_steps": 100000000,
++    "entropy_cost": 0.001,
++    "discounting": 0.995,
++    "unroll_length": 32
++  }
++}

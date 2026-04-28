@@ -1,0 +1,49 @@
+diff --git a/puppersim/pupper_tasks/locomotion_task/rewards/manager.py b/puppersim/pupper_tasks/locomotion_task/rewards/manager.py
+new file mode 100644
+index 0000000..2e986de
+--- /dev/null
++++ b/puppersim/pupper_tasks/locomotion_task/rewards/manager.py
+@@ -0,0 +1,43 @@
++"""Composable weighted reward manager."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++from typing import Callable, Dict, Mapping
++
++import numpy as np
++
++from puppersim.pupper_tasks.locomotion_task.rewards.state import RewardState
++
++
++@dataclass
++class RewardTerm:
++  name: str
++  fn: Callable[..., float]
++  weight: float
++  kwargs: Mapping[str, object] = field(default_factory=dict)
++  enabled: bool = True
++
++
++class RewardManager:
++  """Computes weighted reward sum and keeps per-term debug values."""
++
++  def __init__(self, terms):
++    self._terms = list(terms)
++
++  def compute(self, state: RewardState):
++    total = 0.0
++    breakdown: Dict[str, float] = {}
++    for term in self._terms:
++      if not term.enabled:
++        continue
++      value = float(term.fn(state, **dict(term.kwargs)))
++      if not np.isfinite(value):
++        value = 0.0
++      weighted = float(term.weight) * value
++      total += weighted
++      breakdown[term.name] = value
++      breakdown[term.name + "_weighted"] = weighted
++    breakdown["total_reward"] = float(total)
++    return float(total), breakdown
++

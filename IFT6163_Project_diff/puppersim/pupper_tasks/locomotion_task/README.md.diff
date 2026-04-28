@@ -1,0 +1,57 @@
+diff --git a/puppersim/pupper_tasks/locomotion_task/README.md b/puppersim/pupper_tasks/locomotion_task/README.md
+new file mode 100644
+index 0000000..907d36f
+--- /dev/null
++++ b/puppersim/pupper_tasks/locomotion_task/README.md
+@@ -0,0 +1,51 @@
++# Command Locomotion Task
++
++This package provides a modular low-level locomotion task for Pupper, designed
++to be used as the low-level controller for a future navigation stack.
++
++## Files
++
++- `command_locomotion_task.py`: task class, command sampler, and integration with the environment.
++- `rewards/state.py`: extracts robot and contact state from the simulator.
++- `rewards/terms.py`: reward/penalty term functions.
++- `rewards/manager.py`: weighted aggregation of reward terms with per-term breakdown.
++- `config/pupper_pmtg_command_locomotion.gin`: ready-to-train config.
++
++## Command Sampling Defaults
++
++- Episode length: `1000` steps (10s at 100 Hz env step)
++- Resample interval: `episode_length // 2` (500 steps)
++- `lin_vel_x_range`: `[-0.75, 0.75]`
++- `lin_vel_y_range`: `[-0.5, 0.5]`
++- `ang_vel_yaw_range`: `[-2.0, 2.0]`
++- `zero_command_probability`: `0.02`
++- `stand_still_command_threshold`: `0.05`
++
++## Reward Preset
++
++Configured in `config/pupper_pmtg_command_locomotion.gin`:
++
++- Tracking:
++  - `w_track_lin_vel_xy = 1.5`
++  - `w_track_ang_vel_z = 0.8`
++  - `w_feet_air_time = 0.2`
++- Stability:
++  - `w_lin_vel_z = -0.5`
++  - `w_ang_vel_xy = -0.05`
++  - `w_orientation = -1.2`
++- Smoothness and effort:
++  - `w_torques = -0.0002`
++  - `w_mechanical_work = -0.0005`
++  - `w_joint_acceleration = -0.000001`
++  - `w_action_rate = -0.01`
++- Contact and posture:
++  - `w_foot_slip = -0.1`
++  - `w_abduction_angle = -0.1`
++  - `w_stand_still = -0.1`
++- Safety:
++  - `w_collision = -0.2`
++  - `w_termination = -5.0`
++
++The task also exposes `set_command([vx, vy, yaw_rate])` and
++`clear_command_override()` for integration with a higher-level navigation
++policy.

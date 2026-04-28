@@ -1,0 +1,82 @@
+diff --git a/puppersimMJX/xml_generation/README.md b/puppersimMJX/xml_generation/README.md
+new file mode 100644
+index 0000000..925d894
+--- /dev/null
++++ b/puppersimMJX/xml_generation/README.md
+@@ -0,0 +1,76 @@
++# MJX XML Generation
++
++MJX model assets live in:
++
++```text
++puppersimMJX/assets
++```
++
++The committed assets should already be enough for training and playback. Use these commands only when regenerating XML, camera variants, or AprilTag room assets.
++
++Run commands from the repository root.
++
++## Fix URDF
++
++Adds MuJoCo metadata and relative mesh paths to the source URDF:
++
++```bash
++python puppersimMJX/xml_generation/fix_urdf.py \
++  --urdf_path puppersimMJX/assets/pupper_v2a.urdf \
++  --output_path puppersimMJX/assets/pupper_v2a.fixed.urdf \
++  --meshdir meshes
++```
++
++## Create Stable MJX XML
++
++Builds the stable MJX XML used by locomotion tasks:
++
++```bash
++python puppersimMJX/xml_generation/create_mujoco_xml.py \
++  --input puppersimMJX/assets/pupper_v2a.fixed.xml \
++  --output puppersimMJX/assets/pupper_v2_final_stable.xml \
++  --force
++```
++
++## Add Front Camera
++
++Creates the camera-enabled XML used by camera-style navigation tasks:
++
++```bash
++python puppersimMJX/xml_generation/add_camera_to_xml.py \
++  --xml-path puppersimMJX/assets/pupper_v2_final_stable.xml \
++  --output puppersimMJX/assets/pupper_v2_final_stable_cam.xml \
++  --force
++```
++
++## Create AprilTag Room Assets
++
++Generates AprilTag textures, the tag quad mesh, and an AprilTag room XML:
++
++```bash
++python puppersimMJX/xml_generation/create_apriltag_room_assets.py \
++  --input-xml puppersimMJX/assets/pupper_v2_final_stable_cam.xml \
++  --output-xml puppersimMJX/assets/pupper_v2_apriltag_room.xml \
++  --textures-dir puppersimMJX/assets/textures \
++  --meshes-dir puppersimMJX/assets/meshes
++```
++
++For a larger single good tag and no bad tag:
++
++```bash
++python puppersimMJX/xml_generation/create_apriltag_room_assets.py \
++  --tag-half 0.30 \
++  --no-include-bad-tag
++```
++
++## Path Rule
++
++Keep asset references relative. XML files should use paths such as:
++
++```xml
++<compiler meshdir="meshes/" />
++<mesh file="Cube.003.obj" />
++<texture file="textures/apriltag_36h11_id101.png" />
++```
++
++Do not commit machine-specific absolute paths like `/home/...` inside XML or URDF assets.

@@ -1,0 +1,65 @@
+diff --git a/puppersim/__init__.py b/puppersim/__init__.py
+index 49b69bc..c078a4d 100644
+--- a/puppersim/__init__.py
++++ b/puppersim/__init__.py
+@@ -1,5 +1,13 @@
+ import os
+-from gymnasium import register as register
++
++# Gymnasium is optional for MJX/Brax-only workflows.
++try:
++  import gymnasium as gym
++  from gymnasium import register as register
++except Exception:
++  gym = None
++  register = None
++
+ 
+ register(
+   id='PupperGymEnv-v0',
+@@ -9,12 +17,33 @@ register(
+ )
+ 
+ register(
+-  id='ReacherEnv-v0',
+-  entry_point='puppersim.reacher.reacher_env:ReacherEnv',
+-  max_episode_steps=150,
+-  reward_threshold=5.0,
++  id='PupperNavEnv-v0',
++  entry_point='puppersim.pupper_nav_env:PupperNavGymEnv',
++  max_episode_steps=500,
++  reward_threshold=50.0,
++)
++
++register(
++  id='PupperAprilTagNavEnv-v0',
++  entry_point='puppersim.pupper_apriltag_nav_env:PupperAprilTagNavEnv',
++  max_episode_steps=500,
++  reward_threshold=50.0,
++)
++
++register(
++  id='PupperAprilTagPixelEnv-v0',
++  entry_point='puppersim.pupper_apriltag_pixel_env:PupperAprilTagPixelEnv',
++  max_episode_steps=500,
++  reward_threshold=50.0,
+ )
+ 
++register(
++    id='ReacherEnv-v0',
++    entry_point='puppersim.reacher.reacher_env:ReacherEnv',
++    max_episode_steps=150,
++    reward_threshold=5.0,
++  )
++
+ 
+ def getPupperSimPath():
+     resdir = os.path.join(os.path.dirname(__file__))
+@@ -22,5 +51,7 @@ def getPupperSimPath():
+ 
+ 
+ def getList():
++    if gym is None:
++      return []
+     envs = [spec.id for spec in gym.envs.registry.all() if spec.id.find('Pupper') >= 0]
+     return envs

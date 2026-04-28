@@ -1,0 +1,13 @@
+diff --git a/puppersimMJX/tasks/simple_forward/__init__.py b/puppersimMJX/tasks/simple_forward/__init__.py
+new file mode 100644
+index 0000000..4db7196
+--- /dev/null
++++ b/puppersimMJX/tasks/simple_forward/__init__.py
+@@ -0,0 +1,7 @@
++"""Simple forward locomotion task package."""
++
++from puppersimMJX.tasks.simple_forward.reward import SimpleForwardRewardConfig
++from puppersimMJX.tasks.simple_forward.reward import build_reward
++from puppersimMJX.tasks.simple_forward.reward import compute_simple_forward_reward
++
++__all__ = ["SimpleForwardRewardConfig", "compute_simple_forward_reward", "build_reward"]

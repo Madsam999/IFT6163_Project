@@ -1,0 +1,120 @@
+diff --git a/puppersim/icm.py b/puppersim/icm.py
+new file mode 100644
+index 0000000..13428ae
+--- /dev/null
++++ b/puppersim/icm.py
+@@ -0,0 +1,114 @@
++"""Intrinsic Curiosity Module (Pathak et al., 2017).
++
++Curiosity-driven Exploration by Self-Supervised Prediction.
++https://arxiv.org/abs/1705.05363
++
++Architecture:
++    encoder phi:     obs_dim  -> feature_dim
++    inverse model:   2*feature_dim -> action_dim   (predicts action from state pair)
++    forward model:   feature_dim + action_dim -> feature_dim  (predicts next features)
++
++Intrinsic reward:
++    r_int = (eta / 2) * || phi_hat(s_{t+1}) - phi(s_{t+1}) ||^2
++
++ICM training loss:
++    L_ICM = (1 - lam) * L_forward + lam * L_inverse
++"""
++
++import numpy as np
++import torch
++import torch.nn as nn
++
++
++def _layer_init(layer, std=np.sqrt(2), bias_const=0.0):
++    nn.init.orthogonal_(layer.weight, std)
++    nn.init.constant_(layer.bias, bias_const)
++    return layer
++
++
++class ICMModule(nn.Module):
++    def __init__(self, obs_dim: int, action_dim: int, feature_dim: int = 64,
++                 eta: float = 0.01, lam: float = 0.2):
++        """
++        Args:
++            obs_dim:     Observation space dimensionality.
++            action_dim:  Action space dimensionality.
++            feature_dim: Size of the learned embedding space.
++            eta:         Scales the forward-error intrinsic reward signal.
++            lam:         Balances inverse vs forward loss.
++                         L = (1-lam)*L_forward + lam*L_inverse
++        """
++        super().__init__()
++        self.eta = eta
++        self.lam = lam
++
++        # phi: encodes observations into a compact feature space
++        self.encoder = nn.Sequential(
++            _layer_init(nn.Linear(obs_dim, 128)),
++            nn.ELU(),
++            _layer_init(nn.Linear(128, feature_dim)),
++            nn.ELU(),
++        )
++
++        # Inverse model: given phi(s_t) and phi(s_{t+1}), predict the action taken
++        self.inverse_model = nn.Sequential(
++            _layer_init(nn.Linear(2 * feature_dim, 128)),
++            nn.ELU(),
++            _layer_init(nn.Linear(128, action_dim)),
++        )
++
++        # Forward model: given phi(s_t) and a_t, predict phi(s_{t+1})
++        self.forward_model = nn.Sequential(
++            _layer_init(nn.Linear(feature_dim + action_dim, 128)),
++            nn.ELU(),
++            _layer_init(nn.Linear(128, feature_dim)),
++        )
++
++    @torch.no_grad()
++    def compute_intrinsic_reward(self, obs: torch.Tensor, next_obs: torch.Tensor,
++                                  actions: torch.Tensor) -> torch.Tensor:
++        """Per-step intrinsic reward: forward prediction error in feature space.
++
++        Args:
++            obs:      (N, obs_dim)    current observations
++            next_obs: (N, obs_dim)    next observations
++            actions:  (N, action_dim) actions taken
++
++        Returns:
++            intrinsic_rewards: (N,) non-negative scalar per step
++        """
++        phi = self.encoder(obs)
++        phi_next = self.encoder(next_obs)
++        phi_next_hat = self.forward_model(torch.cat([phi, actions], dim=-1))
++        # Sum over feature dim so reward magnitude doesn't shrink with larger feature_dim
++        intrinsic_rewards = (self.eta / 2.0) * ((phi_next_hat - phi_next) ** 2).sum(dim=-1)
++        return intrinsic_rewards
++
++    def compute_loss(self, obs: torch.Tensor, next_obs: torch.Tensor,
++                     actions: torch.Tensor):
++        """ICM training loss.
++
++        Args:
++            obs:      (N, obs_dim)
++            next_obs: (N, obs_dim)
++            actions:  (N, action_dim)
++
++        Returns:
++            icm_loss:     scalar — total loss for the optimiser
++            forward_loss: scalar — for logging
++            inverse_loss: scalar — for logging
++        """
++        phi = self.encoder(obs)
++        phi_next = self.encoder(next_obs)
++
++        # Forward model: predict next feature from current feature + action
++        phi_next_hat = self.forward_model(torch.cat([phi, actions], dim=-1))
++        # Detach phi_next so only the forward model (not encoder) is pushed by this loss
++        forward_loss = 0.5 * ((phi_next_hat - phi_next.detach()) ** 2).sum(dim=-1).mean()
++
++        # Inverse model: predict action from feature transition
++        action_hat = self.inverse_model(torch.cat([phi, phi_next], dim=-1))
++        inverse_loss = 0.5 * ((action_hat - actions) ** 2).sum(dim=-1).mean()
++
++        icm_loss = (1.0 - self.lam) * forward_loss + self.lam * inverse_loss
++        return icm_loss, forward_loss.detach(), inverse_loss.detach()

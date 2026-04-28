@@ -1,0 +1,13 @@
+diff --git a/puppersimMJX/__init__.py b/puppersimMJX/__init__.py
+new file mode 100644
+index 0000000..8c939f8
+--- /dev/null
++++ b/puppersimMJX/__init__.py
+@@ -0,0 +1,7 @@
++"""MJX/Brax training package for Pupper v2."""
++
++from pathlib import Path
++
++
++def get_assets_path() -> Path:
++    return Path(__file__).resolve().parent / "assets"

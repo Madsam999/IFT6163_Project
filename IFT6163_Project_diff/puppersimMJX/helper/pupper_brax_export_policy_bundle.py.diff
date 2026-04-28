@@ -1,0 +1,247 @@
+diff --git a/puppersimMJX/helper/pupper_brax_export_policy_bundle.py b/puppersimMJX/helper/pupper_brax_export_policy_bundle.py
+new file mode 100644
+index 0000000..c0c58bc
+--- /dev/null
++++ b/puppersimMJX/helper/pupper_brax_export_policy_bundle.py
+@@ -0,0 +1,241 @@
++"""Exports a Brax PPO .params checkpoint to a portable policy bundle.
++
++Bundle contents:
++  - policy_bundle.npz: normalizer stats + policy MLP weights
++  - policy_bundle.json: metadata needed for inference
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import pickle
++from pathlib import Path
++from typing import Any, Dict, Mapping, Optional
++
++import numpy as np
++from flax.serialization import from_bytes
++
++
++def _coerce_loaded_params(params: Any) -> Any:
++    """Best-effort normalization of checkpoint payloads to mapping-like trees."""
++    cur = params
++    for _ in range(4):
++        # Most common object-wrapper case.
++        if isinstance(cur, np.ndarray) and cur.dtype == object and cur.size == 1:
++            cur = cur.reshape(()).item()
++            continue
++        if isinstance(cur, np.ndarray) and cur.dtype == object:
++            return [cur.reshape(-1)[i] for i in range(cur.size)]
++
++        # Some checkpoints store serialized bytes as uint8 vectors/scalars.
++        if isinstance(cur, np.ndarray) and cur.dtype in (np.uint8, np.int8):
++            raw = cur.tobytes()
++            try:
++                return from_bytes(None, raw)
++            except Exception:
++                pass
++            try:
++                return pickle.loads(raw)
++            except Exception:
++                return cur
++
++        # Byte-like scalar payload.
++        if isinstance(cur, (bytes, bytearray, memoryview)):
++            raw = bytes(cur)
++            try:
++                return from_bytes(None, raw)
++            except Exception:
++                pass
++            try:
++                return pickle.loads(raw)
++            except Exception:
++                return cur
++
++        break
++    return cur
++
++
++def _load_params(path: Path) -> Any:
++    raw = path.read_bytes()
++    # Legacy/default flax serialization path.
++    try:
++        return from_bytes(None, raw)
++    except Exception:
++        pass
++
++    # Newer trainer default saves params as .npz.
++    if path.suffix.lower() == ".npz" or raw[:4] == b"PK\x03\x04":
++        with np.load(path, allow_pickle=True) as ckpt:
++            files = list(ckpt.files)
++            if not files:
++                raise ValueError(f"Empty npz checkpoint: {path}")
++
++            # Common case: single object-pickled `params`.
++            if len(files) == 1 and files[0] == "params":
++                p = ckpt["params"]
++                return _coerce_loaded_params(p)
++
++            # Flat slash-delimited keys -> nested dict.
++            root: Dict[str, Any] = {}
++            for k in files:
++                v = ckpt[k]
++                parts = [s for s in k.split("/") if s]
++                if not parts:
++                    continue
++                node = root
++                for part in parts[:-1]:
++                    child = node.get(part)
++                    if not isinstance(child, dict):
++                        child = {}
++                        node[part] = child
++                    node = child
++                node[parts[-1]] = v
++            return _coerce_loaded_params(root)
++
++    # Optional pickle fallback.
++    try:
++        return _coerce_loaded_params(pickle.loads(raw))
++    except Exception as exc:
++        raise ValueError(f"Unsupported params format for {path}") from exc
++
++
++def _pick_normalizer(tree: Mapping[str, Any], key_hint: Optional[str]) -> Dict[str, Any]:
++    def _as_norm(candidate: Any) -> Optional[Dict[str, Any]]:
++        if isinstance(candidate, Mapping):
++            if "mean" in candidate and "std" in candidate:
++                return dict(candidate)
++            return None
++        if hasattr(candidate, "mean") and hasattr(candidate, "std"):
++            out = {
++                "mean": getattr(candidate, "mean"),
++                "std": getattr(candidate, "std"),
++            }
++            out["std_eps"] = getattr(candidate, "std_eps", np.asarray(1e-6, dtype=np.float32))
++            return out
++        return None
++
++    if key_hint and key_hint in tree:
++        candidate = _as_norm(tree[key_hint])
++        if candidate is not None:
++            return candidate
++
++    for _, value in tree.items():
++        candidate = _as_norm(value)
++        if candidate is not None:
++            return candidate
++    raise ValueError("Could not find normalizer subtree with keys {mean,std}.")
++
++
++def _pick_policy(tree: Mapping[str, Any], key_hint: Optional[str]) -> Dict[str, Any]:
++    if key_hint and key_hint in tree:
++        candidate = tree[key_hint]
++        if isinstance(candidate, dict) and "params" in candidate:
++            params = candidate["params"]
++            if isinstance(params, dict) and any(k.startswith("hidden_") for k in params.keys()):
++                return params
++
++    best = None
++    best_out = -1
++    for _, value in tree.items():
++        if not isinstance(value, dict) or "params" not in value:
++            continue
++        params = value["params"]
++        if not isinstance(params, dict):
++            continue
++        layer_names = sorted(
++            [k for k in params.keys() if k.startswith("hidden_")],
++            key=lambda x: int(x.split("_")[1]),
++        )
++        if not layer_names:
++            continue
++        out_bias = params[layer_names[-1]].get("bias")
++        if out_bias is None:
++            continue
++        out_dim = int(np.asarray(out_bias).shape[0])
++        if out_dim > best_out:
++            best_out = out_dim
++            best = params
++    if best is None:
++        raise ValueError("Could not find policy parameter subtree.")
++    return best
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--params-path", type=Path, required=True)
++    parser.add_argument("--output-dir", type=Path, required=True)
++    parser.add_argument("--activation", type=str, default="elu")
++    parser.add_argument("--policy-key", type=str, default="")
++    parser.add_argument("--normalizer-key", type=str, default="")
++    parser.add_argument(
++        "--action-head",
++        type=str,
++        default="normal_tanh",
++        choices=["normal_tanh", "tanh", "raw"],
++        help="How to interpret policy output during inference.",
++    )
++    args = parser.parse_args()
++
++    params = _load_params(args.params_path)
++    if not isinstance(params, Mapping):
++        if isinstance(params, (list, tuple)):
++            params = {f"item_{i}": v for i, v in enumerate(params)}
++        else:
++            raise ValueError(f"Unsupported params root type: {type(params)} (expected mapping).")
++
++    norm = _pick_normalizer(params, args.normalizer_key or None)
++    policy = _pick_policy(params, args.policy_key or None)
++
++    layer_names = sorted([k for k in policy.keys() if k.startswith("hidden_")], key=lambda x: int(x.split("_")[1]))
++    if not layer_names:
++        raise ValueError("No hidden_* layers found in selected policy.")
++
++    arrays = {
++        "obs_mean": np.asarray(norm["mean"], dtype=np.float32),
++        "obs_std": np.asarray(norm["std"], dtype=np.float32),
++        "obs_std_eps": np.asarray(norm["std_eps"], dtype=np.float32),
++    }
++
++    hidden_sizes = []
++    for i, name in enumerate(layer_names):
++        w = np.asarray(policy[name]["kernel"], dtype=np.float32)
++        b = np.asarray(policy[name]["bias"], dtype=np.float32)
++        arrays[f"{name}.kernel"] = w
++        arrays[f"{name}.bias"] = b
++        if i < len(layer_names) - 1:
++            hidden_sizes.append(int(w.shape[1]))
++
++    obs_dim = int(arrays["obs_mean"].shape[0])
++    output_dim = int(arrays[f"{layer_names[-1]}.bias"].shape[0])
++    if args.action_head == "normal_tanh" and output_dim % 2 == 0:
++        action_dim = int(output_dim // 2)
++    else:
++        action_dim = int(output_dim)
++
++    args.output_dir.mkdir(parents=True, exist_ok=True)
++    npz_path = args.output_dir / "policy_bundle.npz"
++    json_path = args.output_dir / "policy_bundle.json"
++    np.savez_compressed(npz_path, **arrays)
++    json_path.write_text(
++        json.dumps(
++            {
++                "source_params_path": str(args.params_path),
++                "activation": args.activation,
++                "obs_dim": obs_dim,
++                "action_dim": action_dim,
++                "policy_output_dim": output_dim,
++                "hidden_sizes": hidden_sizes,
++                "layer_names": layer_names,
++                "action_head": args.action_head,
++                "notes": "Use with puppersimMJX/helper/pupper_brax_policy_bundle.py for deterministic inference.",
++            },
++            indent=2,
++        )
++    )
++    print(f"wrote: {npz_path}")
++    print(f"wrote: {json_path}")
++
++
++if __name__ == "__main__":
++    main()

@@ -1,0 +1,20 @@
+diff --git a/puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_nopriv_hl_level3.json b/puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_nopriv_hl_level3.json
+new file mode 100644
+index 0000000..5a7f7da
+--- /dev/null
++++ b/puppersimMJX/tasks/apriltag_walls/config/training_profiles/apriltag_walls_camera_nopriv_hl_level3.json
+@@ -0,0 +1,14 @@
++{
++  "name": "apriltag_walls_camera_nopriv_hl_level3",
++  "description": "Level 3: same random-wall setup as level 2, collect 3 tags per episode, expose goals_collected in observation, and end when all are collected.",
++  "env_kwargs": "puppersimMJX/tasks/apriltag_walls/config/pupper_brax_env_kwargs.apriltag_walls_camera_nopriv_hl_level3.json",
++  "train_overrides": {
++    "learning_rate": 0.0001,
++    "learning_rate_schedule": "linear",
++    "learning_rate_final": 0.00001,
++    "learning_rate_anneal_steps": 100000000,
++    "entropy_cost": 0.001,
++    "discounting": 0.995,
++    "unroll_length": 128
++  }
++}

@@ -1,0 +1,7 @@
+diff --git a/puppersimMJX/tasks/__init__.py b/puppersimMJX/tasks/__init__.py
+new file mode 100644
+index 0000000..972cff9
+--- /dev/null
++++ b/puppersimMJX/tasks/__init__.py
+@@ -0,0 +1 @@
++"""Task modules for MJX training."""

@@ -1,0 +1,7 @@
+diff --git a/puppersimMJX/helper/__init__.py b/puppersimMJX/helper/__init__.py
+new file mode 100644
+index 0000000..891f397
+--- /dev/null
++++ b/puppersimMJX/helper/__init__.py
+@@ -0,0 +1 @@
++"""Helper utilities for policy bundles and rollout reporting."""

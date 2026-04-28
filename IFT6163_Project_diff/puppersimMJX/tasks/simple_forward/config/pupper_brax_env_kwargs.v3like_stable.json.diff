@@ -1,0 +1,48 @@
+diff --git a/puppersimMJX/tasks/simple_forward/config/pupper_brax_env_kwargs.v3like_stable.json b/puppersimMJX/tasks/simple_forward/config/pupper_brax_env_kwargs.v3like_stable.json
+new file mode 100644
+index 0000000..0ae52dd
+--- /dev/null
++++ b/puppersimMJX/tasks/simple_forward/config/pupper_brax_env_kwargs.v3like_stable.json
+@@ -0,0 +1,42 @@
++{
++  "model_path": "puppersimMJX/assets/pupper_v2_final_stable.xml",
++  "urdf_path": "puppersimMJX/assets/pupper_v2a.urdf",
++  "auto_generate_mjcf": false,
++  "regenerate_mjcf_if_exists": false,
++  "conversion_kp": 30.0,
++  "conversion_kd": 1.0,
++  "conversion_timestep": 0.002,
++  "conversion_mjx_compatible": true,
++  "conversion_mjx_iterations": 1,
++  "conversion_mjx_ls_iterations": 5,
++  "conversion_mjx_impratio": 10.0,
++  "conversion_floating_base": true,
++  "conversion_spawn_z": 0.17,
++  "conversion_add_tracking_camera": true,
++  "conversion_collision_mode": "feet_only",
++  "action_scale": 1.0,
++  "reward_module": "puppersimMJX.tasks.simple_forward.reward",
++  "reward_requires_command": false,
++  "reward_config": {
++    "weight": 1.0,
++    "divide_with_dt": false,
++    "clip_velocity": 0.0025,
++    "weight_action_accel": 0.0,
++    "energy_penalty_coef": 0.0,
++    "torque_penalty_coef": 0.0001,
++    "forward_axis": "y_neg",
++    "allow_action_torque_fallback": false
++  },
++  "forward_axis": "y",
++  "forward_reward_weight": 1.0,
++  "survival_reward": 0.0,
++  "ctrl_cost_weight": 0.0,
++  "healthy_z_range": [0.05, 0.6],
++  "terminal_roll_pitch_threshold": 0.4,
++  "use_pybullet_terminal_condition": true,
++  "terminate_when_unhealthy": true,
++  "reset_noise_scale": 0.0,
++  "reset_base_noise_scale": 0.0,
++  "reset_qd_noise_scale": 0.0,
++  "exclude_xy_from_obs": true
++}

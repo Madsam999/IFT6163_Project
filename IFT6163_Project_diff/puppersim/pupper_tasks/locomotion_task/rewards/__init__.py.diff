@@ -1,0 +1,13 @@
+diff --git a/puppersim/pupper_tasks/locomotion_task/rewards/__init__.py b/puppersim/pupper_tasks/locomotion_task/rewards/__init__.py
+new file mode 100644
+index 0000000..bba5c30
+--- /dev/null
++++ b/puppersim/pupper_tasks/locomotion_task/rewards/__init__.py
+@@ -0,0 +1,7 @@
++"""Reward modules for command-conditioned locomotion."""
++
++from puppersim.pupper_tasks.locomotion_task.rewards.manager import RewardManager
++from puppersim.pupper_tasks.locomotion_task.rewards.manager import RewardTerm
++
++__all__ = ["RewardManager", "RewardTerm"]
++

@@ -1,0 +1,8 @@
+diff --git a/puppersim/pupper_tasks/__init__.py b/puppersim/pupper_tasks/__init__.py
+new file mode 100644
+index 0000000..7e38845
+--- /dev/null
++++ b/puppersim/pupper_tasks/__init__.py
+@@ -0,0 +1,2 @@
++"""Task package for Pupper simulation."""
++

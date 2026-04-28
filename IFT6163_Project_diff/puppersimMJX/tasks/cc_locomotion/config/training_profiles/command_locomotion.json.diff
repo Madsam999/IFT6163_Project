@@ -1,0 +1,14 @@
+diff --git a/puppersimMJX/tasks/cc_locomotion/config/training_profiles/command_locomotion.json b/puppersimMJX/tasks/cc_locomotion/config/training_profiles/command_locomotion.json
+new file mode 100644
+index 0000000..add3137
+--- /dev/null
++++ b/puppersimMJX/tasks/cc_locomotion/config/training_profiles/command_locomotion.json
+@@ -0,0 +1,8 @@
++{
++  "name": "command_locomotion",
++  "description": "Command-conditioned locomotion profile with domain randomization defaults.",
++  "env_kwargs": "puppersimMJX/tasks/cc_locomotion/config/pupper_brax_env_kwargs.command_locomotion.json",
++  "randomization_module": "puppersimMJX.pupper_brax_domain_randomization",
++  "randomization_fn": "domain_randomize",
++  "randomization_kwargs": "puppersimMJX/tasks/cc_locomotion/config/pupper_brax_randomization_kwargs.v3like.json"
++}

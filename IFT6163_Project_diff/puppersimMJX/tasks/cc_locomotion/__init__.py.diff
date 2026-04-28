@@ -1,0 +1,19 @@
+diff --git a/puppersimMJX/tasks/cc_locomotion/__init__.py b/puppersimMJX/tasks/cc_locomotion/__init__.py
+new file mode 100644
+index 0000000..e570136
+--- /dev/null
++++ b/puppersimMJX/tasks/cc_locomotion/__init__.py
+@@ -0,0 +1,13 @@
++"""Command-conditioned locomotion task package."""
++
++from puppersimMJX.tasks.cc_locomotion.reward import CommandRewardConfig
++from puppersimMJX.tasks.cc_locomotion.reward import CommandRewardScales
++from puppersimMJX.tasks.cc_locomotion.reward import build_reward
++from puppersimMJX.tasks.cc_locomotion.reward import compute_command_reward
++
++__all__ = [
++    "CommandRewardConfig",
++    "CommandRewardScales",
++    "compute_command_reward",
++    "build_reward",
++]

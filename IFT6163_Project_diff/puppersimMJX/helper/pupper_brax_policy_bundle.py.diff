@@ -1,0 +1,98 @@
+diff --git a/puppersimMJX/helper/pupper_brax_policy_bundle.py b/puppersimMJX/helper/pupper_brax_policy_bundle.py
+new file mode 100644
+index 0000000..884b403
+--- /dev/null
++++ b/puppersimMJX/helper/pupper_brax_policy_bundle.py
+@@ -0,0 +1,92 @@
++"""Portable NumPy inference for exported Brax PPO policy bundles."""
++
++from __future__ import annotations
++
++import json
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Callable, Dict, List
++
++import numpy as np
++
++
++def _activation_fn(name: str) -> Callable[[np.ndarray], np.ndarray]:
++    key = name.strip().lower()
++    if key == "tanh":
++        return np.tanh
++    if key == "relu":
++        return lambda x: np.maximum(x, 0.0)
++    if key == "elu":
++        return lambda x: np.where(x > 0.0, x, np.expm1(np.clip(x, -60.0, 60.0)))
++    if key == "sigmoid":
++        return lambda x: 1.0 / (1.0 + np.exp(-x))
++    if key in ("swish", "silu"):
++        return lambda x: x * (1.0 / (1.0 + np.exp(-x)))
++    if key == "gelu":
++        return lambda x: 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3)))
++    if key == "leaky_relu":
++        return lambda x: np.where(x >= 0.0, x, 0.01 * x)
++    raise ValueError(f"Unsupported activation '{name}'.")
++
++
++@dataclass
++class DenseLayer:
++    kernel: np.ndarray
++    bias: np.ndarray
++
++
++class BraxPolicyBundle:
++    """Loads and runs a policy exported by `helper/pupper_brax_export_policy_bundle.py`."""
++
++    def __init__(self, bundle_dir: str | Path):
++        bundle_dir = Path(bundle_dir)
++        meta = json.loads((bundle_dir / "policy_bundle.json").read_text())
++        arrays = np.load(bundle_dir / "policy_bundle.npz", allow_pickle=False)
++
++        self.activation_name: str = str(meta["activation"])
++        self.action_head: str = str(meta.get("action_head", "normal_tanh"))
++        self.obs_dim: int = int(meta["obs_dim"])
++        self.action_dim: int = int(meta["action_dim"])
++        self.layer_names: List[str] = list(meta["layer_names"])
++
++        self.obs_mean = np.asarray(arrays["obs_mean"], dtype=np.float32)
++        self.obs_std = np.asarray(arrays["obs_std"], dtype=np.float32)
++        self.obs_std_eps = np.asarray(arrays["obs_std_eps"], dtype=np.float32)
++
++        self.layers: List[DenseLayer] = []
++        for name in self.layer_names:
++            self.layers.append(
++                DenseLayer(
++                    kernel=np.asarray(arrays[f"{name}.kernel"], dtype=np.float32),
++                    bias=np.asarray(arrays[f"{name}.bias"], dtype=np.float32),
++                )
++            )
++
++        self._activation = _activation_fn(self.activation_name)
++
++    def normalize_obs(self, obs: np.ndarray) -> np.ndarray:
++        obs = np.asarray(obs, dtype=np.float32)
++        if obs.shape[-1] != self.obs_dim:
++            raise ValueError(f"Expected obs dim {self.obs_dim}, got {obs.shape[-1]}.")
++        denom = np.maximum(self.obs_std, self.obs_std_eps)
++        return (obs - self.obs_mean) / denom
++
++    def _forward_raw(self, obs_norm: np.ndarray) -> np.ndarray:
++        x = obs_norm
++        for i, layer in enumerate(self.layers):
++            x = x @ layer.kernel + layer.bias
++            if i < len(self.layers) - 1:
++                x = self._activation(x)
++        return x
++
++    def deterministic_action(self, obs: np.ndarray) -> np.ndarray:
++        obs_norm = self.normalize_obs(obs)
++        out = self._forward_raw(obs_norm)
++        if self.action_head == "normal_tanh":
++            mean = out[..., : self.action_dim]
++            return np.tanh(mean).astype(np.float32)
++        if self.action_head == "tanh":
++            return np.tanh(out[..., : self.action_dim]).astype(np.float32)
++        if self.action_head == "raw":
++            return out[..., : self.action_dim].astype(np.float32)
++        raise ValueError(f"Unsupported action_head '{self.action_head}'.")

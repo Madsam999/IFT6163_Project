@@ -1,0 +1,37 @@
+diff --git a/setup.py b/setup.py
+index 52cd19e..bd3244e 100644
+--- a/setup.py
++++ b/setup.py
+@@ -34,7 +34,16 @@ setup(
+     license="Apache 2.0",
+     packages=find_packages(),
+     include_package_data=True,
+-    package_data={'data': ["upper_leg_left_rear.obj"]},
++    package_data={
++        "data": ["upper_leg_left_rear.obj"],
++        "puppersimMJX": [
++            "assets/*.urdf",
++            "assets/*.xml",
++            "assets/meshes/*",
++            "assets/meshes/textures/*",
++            "assets/textures/*",
++        ],
++    },
+     install_requires=[
+         "attrs",
+         "gymnasium",
+@@ -48,8 +57,13 @@ setup(
+         "scipy",
+         "pyserial",
+         "moviepy",
+-        "pupper_hardware_interface @ git+https://github.com/stanfordroboticsclub/Pupper-V2-Interface.git",
+     ],
++    extras_require={
++        # Only needed when deploying to the physical Pupper robot
++        "hardware": [
++            "pupper_hardware_interface @ git+https://github.com/stanfordroboticsclub/Pupper-V2-Interface.git",
++        ],
++    },
+     classifiers=[
+         "Development Status :: 4 - Beta",
+         "Intended Audience :: Developers",

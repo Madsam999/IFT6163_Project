@@ -1,0 +1,11 @@
+diff --git a/puppersimMJX/tasks/simple_forward/config/training_profiles/simple_forward_locomotion.json b/puppersimMJX/tasks/simple_forward/config/training_profiles/simple_forward_locomotion.json
+new file mode 100644
+index 0000000..1e499ff
+--- /dev/null
++++ b/puppersimMJX/tasks/simple_forward/config/training_profiles/simple_forward_locomotion.json
+@@ -0,0 +1,5 @@
++{
++  "name": "simple_forward_locomotion",
++  "description": "Baseline locomotion profile with simple-forward reward.",
++  "env_kwargs": "puppersimMJX/tasks/simple_forward/config/pupper_brax_env_kwargs.v3like_stable.json"
++}
