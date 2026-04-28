@@ -71,5 +71,5 @@ The practical commands for training and testing pretrained policies are listed
 in:
 
 ```text
-puppersimMJX/README.md
+IFT6163_Project/README.md
 ```
